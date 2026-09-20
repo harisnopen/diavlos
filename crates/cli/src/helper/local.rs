@@ -39,7 +39,7 @@ pub fn bind(paths: &Paths) -> anyhow::Result<Listener> {
     Ok(opts.create_tokio()?)
 }
 
-pub async fn serve(helper: Arc<Helper>, listener: Listener) {
+pub async fn serve(helper: Arc<Helper>, listener: Arc<Listener>) {
     loop {
         match listener.accept().await {
             Ok(stream) => {

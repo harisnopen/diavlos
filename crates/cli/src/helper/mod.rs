@@ -774,7 +774,8 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
     }
     // Commands over the local socket.
     let listener = local::bind(&paths)?;
-    tokio::spawn(local::serve(helper.clone(), listener));
+    let listener_handle = Arc::new(listener);
+    let local_task = tokio::spawn(local::serve(helper.clone(), listener_handle.clone()));
 
     let mut rx = helper.shutdown_signal();
     tokio::select! {
@@ -782,11 +783,12 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         _ = rx.changed() => info!("stop requested"),
     }
     helper.emit("helper_down", None, Value::Null);
+    // Drop the listener first: it removes its own socket file. Removing it
+    // by path here would race a freshly started helper that already bound
+    // the same name.
+    local_task.abort();
+    drop(listener_handle);
     helper.net.shutdown().await;
-    #[cfg(unix)]
-    {
-        let _ = std::fs::remove_file(paths.socket_file());
-    }
     info!("helper down");
     // Let the log flush.
     tokio::time::sleep(Duration::from_millis(50)).await;
