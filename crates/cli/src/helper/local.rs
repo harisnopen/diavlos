@@ -29,14 +29,45 @@ use crate::net::Wire;
 const SEND_WAIT: Duration = Duration::from_secs(3);
 
 pub fn bind(paths: &Paths) -> anyhow::Result<Listener> {
-    let name = paths.socket_name()?;
-    let opts = ListenerOptions::new().name(name);
     #[cfg(unix)]
-    let opts = {
+    {
         use interprocess::os::unix::local_socket::ListenerOptionsExt;
-        opts.mode(0o600)
-    };
-    Ok(opts.create_tokio()?)
+        // interprocess applies the mode with fchmod() before bind(). Linux
+        // allows that on a socket; macOS refuses it with EINVAL, which comes
+        // back as Unsupported. Fall back to the umask way there.
+        let opts = ListenerOptions::new()
+            .name(paths.socket_name()?)
+            .mode(0o600);
+        match opts.create_tokio() {
+            Ok(listener) => Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => bind_with_umask(paths),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let opts = ListenerOptions::new().name(paths.socket_name()?);
+        Ok(opts.create_tokio()?)
+    }
+}
+
+/// Bind with the umask narrowed so the socket file is born owner-only,
+/// then set it to 0600. For Unix systems where the mode cannot be set on
+/// the socket before bind (macOS).
+#[cfg(unix)]
+fn bind_with_umask(paths: &Paths) -> anyhow::Result<Listener> {
+    use std::os::unix::fs::PermissionsExt;
+    let name = paths.socket_name()?;
+    // SAFETY: umask(2) only reads and sets this process's file mode mask.
+    // The helper is the only thing running in this process, and the old
+    // mask is put back right after the bind.
+    let old = unsafe { libc::umask(0o077) };
+    let result = ListenerOptions::new().name(name).create_tokio();
+    // SAFETY: as above.
+    unsafe { libc::umask(old) };
+    let listener = result?;
+    std::fs::set_permissions(paths.socket_file(), std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 pub async fn serve(helper: Arc<Helper>, listener: Arc<Listener>) {
@@ -1088,5 +1119,36 @@ async fn stream_watch(helper: &Helper, stream: &Stream, room: &str, identity: &s
             })),
         )
         .await?;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn umask_bind_makes_an_owner_only_socket() {
+        let dir = std::env::temp_dir().join(format!(
+            "diavlos-umask-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = Paths { home: dir.clone() };
+        let listener = bind_with_umask(&paths).unwrap();
+        let mode = std::fs::metadata(paths.socket_file())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        // A client can still connect to it.
+        let stream = Stream::connect(paths.socket_name().unwrap()).await;
+        assert!(stream.is_ok());
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
