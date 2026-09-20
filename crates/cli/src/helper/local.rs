@@ -467,6 +467,30 @@ async fn join(helper: &Arc<Helper>, token: &str, identity: &str) -> Result<JoinR
             });
         }
     }
+    if inv.home_node == helper.net.node_id() {
+        // The room lives on this very helper: another key on the same
+        // machine is joining. No network needed.
+        let me = helper.net.node_id();
+        let (room, members, _) =
+            super::peers::admit(helper, None, &me, token.trim(), id.signed_profile()).await?;
+        let mine = members
+            .iter()
+            .find(|m| m.key == id.public())
+            .cloned()
+            .ok_or_else(|| Error::Denied("home did not list us as a member".into()))?;
+        helper.store.upsert_member(&mine, Some(identity))?;
+        helper.emit(
+            "room_joined",
+            Some(&room.id),
+            serde_json::json!({"name": mine.name, "room": room.name, "local": true}),
+        );
+        return Ok(JoinResult {
+            name: mine.name,
+            members,
+            messages: helper.store.message_count(&room.id)?,
+            room,
+        });
+    }
     let link = helper.net.dial(&inv.home_node, &inv.home_hints).await?;
     let hello = Wire::Hello {
         v: diavlos_core::PROTOCOL_VERSION,
@@ -774,12 +798,18 @@ async fn ask(
     let me = local_member(helper, &room, identity)?.member.name;
     let dl = deadline(timeout_secs);
     let qid = question.id.clone();
+    // A question that carries an action is asking for permission: only a
+    // human-signed approve or deny answers it. Other replies are just talk.
+    let needs_human = question.action.is_some();
     let reply = wait_for(helper, &room, dl, || {
         Ok(helper
             .store
             .replies_to(&room.id, &qid)?
             .into_iter()
-            .find(|m| m.from != me))
+            .find(|m| {
+                m.from != me
+                    && (!needs_human || matches!(m.kind, MessageType::Approve | MessageType::Deny))
+            }))
     })
     .await?;
     Ok(AskResult { question, reply })

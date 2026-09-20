@@ -157,13 +157,16 @@ async fn handle(helper: &Arc<Helper>, link: &Arc<dyn Link>, req: Wire) -> Result
     }
 }
 
-/// Home side: let a joiner in with a signed invite.
-async fn handle_join(
+/// Home side: let a joiner in with a signed invite. `link` is the joiner's
+/// connection, or `None` when the joiner is another identity on this very
+/// helper (two agents on one laptop).
+pub async fn admit(
     helper: &Arc<Helper>,
-    link: &Arc<dyn Link>,
+    link: Option<&Arc<dyn Link>>,
+    remote: &str,
     token: &str,
     profile: diavlos_core::SignedProfile,
-) -> Result<Wire> {
+) -> Result<(Room, Vec<Member>, Vec<Message>)> {
     let inv = Invite::decode(token)?;
     let room = helper
         .store
@@ -174,6 +177,11 @@ async fn handle_join(
             "invite was not issued by this room's owner".into(),
         ));
     }
+    if room.closed {
+        return Err(Error::Denied(
+            "that room was rotated; ask the owner for a new invite".into(),
+        ));
+    }
     let (owner, owner_member) = helper
         .owner_identity(&room)
         .await?
@@ -182,9 +190,8 @@ async fn handle_join(
     if inv.is_expired(&now) {
         return Err(Error::Denied("invite has expired".into()));
     }
-    let remote = link.remote_node();
     if let Some(pin) = &inv.for_node {
-        if *pin != remote {
+        if pin != remote {
             return Err(Error::Denied("invite is pinned to another machine".into()));
         }
     }
@@ -196,7 +203,7 @@ async fn handle_join(
         .filter(|m| !m.revoked);
     let rejoin = matches!(&existing, Some(m) if m.key == key);
     if let Some(other) = helper.store.member_by_key(&room.id, &key)? {
-        if other.name != inv.name {
+        if other.name != inv.name && !other.revoked {
             return Err(Error::Denied(format!(
                 "this key is already in the room as {}",
                 other.name
@@ -223,7 +230,7 @@ async fn handle_join(
         key,
         kind: inv.kind,
         role: inv.role,
-        node: Some(remote.clone()),
+        node: Some(remote.to_string()),
         granted_by: room.owner,
         expires_at: None,
         joined_at: existing
@@ -236,7 +243,9 @@ async fn handle_join(
         profile: serde_json::to_value(&profile).unwrap_or_default(),
     };
     helper.store.upsert_member(&member, None)?;
-    helper.register_link(&room.id, link.clone()).await?;
+    if let Some(link) = link {
+        helper.register_link(&room.id, link.clone()).await?;
+    }
     if !rejoin {
         let draft = diavlos_core::Draft {
             room: room.id.clone(),
@@ -255,9 +264,7 @@ async fn handle_join(
         let mut msg = Message::new(draft, owner.as_ref())?;
         helper.store.sequence_and_append(&mut msg)?;
         helper.notify_room(&room.id, msg.seq);
-        helper
-            .push_to_members(&room, vec![msg], Some(&remote))
-            .await;
+        helper.push_to_members(&room, vec![msg], Some(remote)).await;
         info!(room = %room.id, member = %member.name, node = %remote, "member joined");
         helper.emit(
             "member_joined",
@@ -267,10 +274,23 @@ async fn handle_join(
     }
     let mut room_out = room.clone();
     room_out.home_hints = helper.net.hints();
+    let members = helper.store.members(&room.id)?;
+    let messages = helper.store.messages_after(&room.id, 0, u32::MAX)?;
+    Ok((room_out, members, messages))
+}
+
+async fn handle_join(
+    helper: &Arc<Helper>,
+    link: &Arc<dyn Link>,
+    token: &str,
+    profile: diavlos_core::SignedProfile,
+) -> Result<Wire> {
+    let remote = link.remote_node();
+    let (room, members, messages) = admit(helper, Some(link), &remote, token, profile).await?;
     Ok(Wire::JoinOk {
-        room: room_out,
-        members: helper.store.members(&room.id)?,
-        messages: helper.store.messages_after(&room.id, 0, u32::MAX)?,
+        room,
+        members,
+        messages,
     })
 }
 

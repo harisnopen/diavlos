@@ -179,6 +179,18 @@ fn claims_approvals_and_owner_controls() {
         &["send", "ops", "yes", "--type", "approve", "--reply-to", qid],
         6,
     );
+    // Talk is not permission: a plain reply does not end an ask that
+    // carries an action.
+    c.ok(&[
+        "send",
+        "ops",
+        "let me look",
+        "--type",
+        "reply",
+        "--reply-to",
+        qid,
+    ]);
+    std::thread::sleep(Duration::from_secs(1));
     c.ok(&["send", "ops", "--type", "approve", "--reply-to", qid]);
     let out = asking.wait_with_output().unwrap();
     assert!(
@@ -270,6 +282,22 @@ fn claims_approvals_and_owner_controls() {
         .find(|w| w["name"] == "carol")
         .unwrap();
     assert_eq!(carol["revoked"], true);
+
+    // Two agents on one laptop: a second key joins a room that lives on
+    // this very helper, no network needed.
+    let inv = a.invite("ops", "scanner", &[]);
+    let mut a2 = Home {
+        dir: a.dir.clone(),
+        user: "haris",
+        identity: "scanner",
+        env: Vec::new(),
+    };
+    a2.ok(&["join", &inv]);
+    a.ok(&["read", "ops", "--limit", "500"]);
+    a2.ok(&["send", "ops", "same laptop", "--type", "task"]);
+    let got = a.ok(&["next", "ops", "--timeout", "10"]);
+    assert!(got.contains("scanner (task): same laptop"), "{got}");
+    a2.dir = std::path::PathBuf::from("/nonexistent-so-drop-does-nothing");
 
     // Secrets never leave the machine.
     b.fails_with(&["send", "ops", "key AKIAIOSFODNN7EXAMPLE"], 6);

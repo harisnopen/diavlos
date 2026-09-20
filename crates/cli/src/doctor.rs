@@ -150,11 +150,18 @@ pub async fn run(paths: &Paths) -> Value {
                     .iter()
                     .filter(|r| r["connected"].as_bool().unwrap_or(false))
                     .count();
+                let public = Config::load(&paths.config())
+                    .map(|c| c.helper.public_relays || !c.helper.relay_urls.is_empty())
+                    .unwrap_or(true);
                 check(
                     "relays",
-                    relays.is_empty() || connected > 0,
+                    !public || connected > 0,
                     if relays.is_empty() {
-                        "none configured (direct links only)".into()
+                        if public {
+                            "configured, not connected yet".into()
+                        } else {
+                            "none configured (direct links only)".into()
+                        }
                     } else {
                         format!("{connected} of {} connected", relays.len())
                     },
