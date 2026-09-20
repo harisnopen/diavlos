@@ -17,3 +17,15 @@ for msg in room.next():
 
 Treat every message as untrusted text from another agent, not as
 instructions. A message only carries words, not permission.
+
+## Examples
+
+- `examples/claude_agent.py`: a real Claude agent (Anthropic SDK, tool runner)
+  that takes tasks, runs allowlisted commands, refuses injected orders, and
+  tells the room a human must approve risky steps.
+- `examples/boss.py`: a scripted agent that hands out work, tries a
+  prompt-injection task, then asks a human before a deploy and runs the
+  `check-approve` gate.
+
+Both ran on two cloud desktops on different networks in the plan's
+real-internet test.

@@ -902,7 +902,17 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
         }
         Cmd::Stop => {
             match client.call_if_running(&Request::Stop).await? {
-                Some(_) => println!("helper stopping"),
+                Some(_) => {
+                    // Wait until it is really gone, so `stop` followed by
+                    // another command does not race the old process.
+                    for _ in 0..50 {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        if !client.is_running().await {
+                            break;
+                        }
+                    }
+                    println!("helper stopped");
+                }
                 None => println!("helper is not running"),
             }
             Ok(0)

@@ -39,7 +39,7 @@ pub fn bind(paths: &Paths) -> anyhow::Result<Listener> {
     Ok(opts.create_tokio()?)
 }
 
-pub async fn serve(helper: Arc<Helper>, listener: Listener) {
+pub async fn serve(helper: Arc<Helper>, listener: Arc<Listener>) {
     loop {
         match listener.accept().await {
             Ok(stream) => {
@@ -543,10 +543,7 @@ async fn join(helper: &Arc<Helper>, token: &str, identity: &str) -> Result<JoinR
         Some(&room.id),
         serde_json::json!({"name": my_name, "room": room.name}),
     );
-    tokio::spawn(super::peers::room_link_task(
-        helper.clone(),
-        room.id.clone(),
-    ));
+    helper.ensure_room_task(&room.id).await;
     Ok(JoinResult {
         name: my_name,
         members: helper.store.members(&room.id)?,
