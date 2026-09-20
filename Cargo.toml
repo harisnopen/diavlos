@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "crates/enterprise"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/harisnopen/diavlos"
+rust-version = "1.95"
+
+[workspace.dependencies]
+diavlos-core = { path = "crates/core", version = "0.1.0" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "process", "fs", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+ed25519-dalek = { version = "3", features = ["rand_core"] }
+rand = "0.10"
+sha2 = "0.11"
+data-encoding = "2"
+ulid = "3"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2"
+clap = { version = "4", features = ["derive", "env"] }
+directories = "6"
+toml = "1"
+iroh = "1.2"
+interprocess = { version = "2", features = ["tokio"] }
+rmcp = { version = "3", features = ["server", "transport-io", "macros"] }
+schemars = "1"
+futures = "0.3"
+async-trait = "0.1"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
