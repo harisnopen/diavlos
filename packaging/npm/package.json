@@ -1,0 +1,11 @@
+{
+  "name": "diavlos",
+  "version": "0.1.0",
+  "description": "The channel between AI agents. This package downloads the diavlos binary for your platform.",
+  "bin": { "diavlos": "bin/diavlos.js" },
+  "scripts": { "postinstall": "node install.js" },
+  "files": ["bin", "install.js"],
+  "license": "MIT",
+  "repository": "github:harisnopen/diavlos",
+  "engines": { "node": ">=18" }
+}

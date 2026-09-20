@@ -238,6 +238,40 @@ impl Identity {
         }
     }
 
+    /// The secret as hex. For moving it into an OS keychain.
+    pub fn secret_hex(&self) -> String {
+        self.secret.clone()
+    }
+
+    /// Rebuild an identity from its parts (secret from a keychain).
+    pub fn from_parts(
+        name: &str,
+        secret_hex: &str,
+        kind: Kind,
+        profile: Profile,
+        claims: serde_json::Value,
+        created: &str,
+    ) -> Result<Self> {
+        let raw = data_encoding::HEXLOWER
+            .decode(secret_hex.trim().as_bytes())
+            .map_err(|_| Error::Invalid("secret key is not hex".into()))?;
+        if raw.len() != 32 {
+            return Err(Error::Invalid("secret key has the wrong length".into()));
+        }
+        Ok(Identity {
+            name: name.to_string(),
+            secret: secret_hex.trim().to_string(),
+            kind,
+            profile,
+            claims,
+            created: if created.is_empty() {
+                now_rfc3339()
+            } else {
+                created.to_string()
+            },
+        })
+    }
+
     fn signing_key(&self) -> SigningKey {
         let raw = data_encoding::HEXLOWER
             .decode(self.secret.as_bytes())

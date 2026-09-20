@@ -8,6 +8,8 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use rusqlite_migration::{Migrations, M};
 
@@ -15,11 +17,12 @@ use crate::error::{Error, Result};
 use crate::invite::Invite;
 use crate::keys::{Kind, PublicKey};
 use crate::limits::Limits;
-use crate::message::{Content, DataClass, Message, GENESIS_PREV};
+use crate::message::{Content, DataClass, Message, MessageType, GENESIS_PREV};
 use crate::room::{Member, Role, Room};
 
-const MIGRATIONS: &[M<'static>] = &[M::up(
-    r#"
+const MIGRATIONS: &[M<'static>] = &[
+    M::up(
+        r#"
     CREATE TABLE rooms (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
@@ -94,12 +97,31 @@ const MIGRATIONS: &[M<'static>] = &[M::up(
       used_by TEXT
     );
     "#,
-)];
+    ),
+    M::up(
+        r#"
+    ALTER TABLE rooms ADD COLUMN closed INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN reply_to TEXT;
+    UPDATE messages SET reply_to = json_extract(envelope, '$.reply_to');
+    CREATE INDEX messages_reply_to ON messages(room_id, reply_to);
+    CREATE TABLE approvals_used (
+      msg_id TEXT PRIMARY KEY,
+      action_hash TEXT NOT NULL,
+      used_at TEXT NOT NULL
+    );
+    "#,
+    ),
+];
 
 /// The store. Safe to share between threads; one connection, one lock.
 pub struct Store {
     conn: Mutex<Connection>,
+    /// When set, message content is encrypted at rest. Envelopes stay
+    /// plain: the chain is public inside the room anyway.
+    cipher: Option<XChaCha20Poly1305>,
 }
+
+const ENC_PREFIX: &str = "enc1:";
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -119,26 +141,77 @@ impl Store {
     /// Open (or create) the database file and bring the schema up to date.
     /// Mixed versions are normal; migrations run from v0.1 on.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_key(path, None)
+    }
+
+    /// Open with a 32-byte key: message content is then encrypted at rest.
+    /// Content written before the key was set is still readable.
+    pub fn open_with_key(path: &Path, key: Option<[u8; 32]>) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        Self::init(conn)
+        Self::init(conn, key)
     }
 
     /// An in-memory store for tests.
     pub fn open_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(mut conn: Connection) -> Result<Self> {
+    /// An in-memory encrypted store for tests.
+    pub fn open_memory_with_key(key: [u8; 32]) -> Result<Self> {
+        Self::init(Connection::open_in_memory()?, Some(key))
+    }
+
+    fn init(mut conn: Connection, key: Option<[u8; 32]>) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Migrations::from_slice(MIGRATIONS).to_latest(&mut conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
+            cipher: key.map(|k| XChaCha20Poly1305::new((&k).into())),
         })
+    }
+
+    /// True if content is encrypted at rest.
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
+    }
+
+    fn seal(&self, body: &str) -> Result<String> {
+        match &self.cipher {
+            None => Ok(body.to_string()),
+            Some(c) => {
+                let nonce_bytes: [u8; 24] = rand::random();
+                let nonce = XNonce::from(nonce_bytes);
+                let ct = c
+                    .encrypt(&nonce, body.as_bytes())
+                    .map_err(|_| Error::Other("encrypt failed".into()))?;
+                let mut out = nonce_bytes.to_vec();
+                out.extend_from_slice(&ct);
+                Ok(format!(
+                    "{ENC_PREFIX}{}",
+                    data_encoding::BASE64.encode(&out)
+                ))
+            }
+        }
+    }
+
+    fn unseal(&self, stored: &str) -> Option<String> {
+        let Some(b64) = stored.strip_prefix(ENC_PREFIX) else {
+            return Some(stored.to_string());
+        };
+        let c = self.cipher.as_ref()?;
+        let raw = data_encoding::BASE64.decode(b64.as_bytes()).ok()?;
+        if raw.len() < 24 {
+            return None;
+        }
+        let (n, ct) = raw.split_at(24);
+        let nonce = XNonce::from(<[u8; 24]>::try_from(n).ok()?);
+        let pt = c.decrypt(&nonce, ct).ok()?;
+        String::from_utf8(pt).ok()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -178,7 +251,7 @@ impl Store {
     pub fn update_room(&self, room: &Room) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "UPDATE rooms SET about=?2, retention_days=?3, class=?4, paused=?5, hold=?6, home_node=?7, home_hints=?8 WHERE id=?1",
+            "UPDATE rooms SET about=?2, retention_days=?3, class=?4, paused=?5, hold=?6, home_node=?7, home_hints=?8, closed=?9 WHERE id=?1",
             params![
                 room.id,
                 room.about,
@@ -188,6 +261,7 @@ impl Store {
                 room.hold as i32,
                 room.home_node,
                 serde_json::to_string(&room.home_hints)?,
+                room.closed as i32,
             ],
         )?;
         Ok(())
@@ -207,6 +281,7 @@ impl Store {
             class: class.parse().unwrap_or(DataClass::Internal),
             paused: row.get::<_, i32>("paused")? != 0,
             hold: row.get::<_, i32>("hold")? != 0,
+            closed: row.get::<_, i32>("closed").unwrap_or(0) != 0,
             home_node: row.get("home_node")?,
             home_hints: serde_json::from_str(&hints).unwrap_or(serde_json::Value::Null),
         })
@@ -374,6 +449,59 @@ impl Store {
             .optional()?)
     }
 
+    pub fn set_member_role(
+        &self,
+        room_id: &str,
+        name: &str,
+        role: Role,
+        expires_at: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE members SET role=?3, expires_at=?4 WHERE room_id=?1 AND name=?2",
+            params![room_id, name, role.as_str(), expires_at],
+        )?;
+        Ok(n == 1)
+    }
+
+    pub fn set_member_muted(&self, room_id: &str, name: &str, muted: bool) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE members SET muted=?3 WHERE room_id=?1 AND name=?2",
+            params![room_id, name, muted as i32],
+        )?;
+        Ok(n == 1)
+    }
+
+    pub fn set_member_revoked(&self, room_id: &str, name: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE members SET revoked=1, node=NULL WHERE room_id=?1 AND name=?2",
+            params![room_id, name],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Forget a member's binding to a machine (so it can join again from
+    /// another one after a reset by the owner).
+    pub fn clear_member_node(&self, room_id: &str, name: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE members SET node=NULL WHERE room_id=?1 AND name=?2",
+            params![room_id, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_room(&self, room_id: &str, new_name: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE rooms SET name=?2 WHERE id=?1",
+            params![room_id, new_name],
+        )?;
+        Ok(())
+    }
+
     /// Record that a member was seen from a node just now.
     pub fn touch_member(
         &self,
@@ -419,12 +547,12 @@ impl Store {
     pub fn append(&self, msg: &Message) -> Result<bool> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        let written = Self::append_in(&tx, msg)?;
+        let written = self.append_in(&tx, msg)?;
         tx.commit()?;
         Ok(written)
     }
 
-    fn append_in(conn: &Connection, msg: &Message) -> Result<bool> {
+    fn append_in(&self, conn: &Connection, msg: &Message) -> Result<bool> {
         if !msg.is_sequenced() {
             return Err(Error::Invalid("message has no seq/prev yet".into()));
         }
@@ -450,8 +578,8 @@ impl Store {
             )));
         }
         conn.execute(
-            "INSERT INTO messages (room_id, seq, id, from_name, type, ts, prev, chain_hash, envelope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO messages (room_id, seq, id, from_name, type, ts, prev, chain_hash, envelope, reply_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 msg.room,
                 msg.seq as i64,
@@ -462,12 +590,20 @@ impl Store {
                 msg.prev,
                 msg.chain_hash(),
                 serde_json::to_string(&msg.envelope())?,
+                msg.reply_to,
             ],
         )?;
-        conn.execute(
-            "INSERT INTO contents (msg_id, body, deleted) VALUES (?1, ?2, 0)",
-            params![msg.id, serde_json::to_string(&msg.content())?],
-        )?;
+        if msg.tombstone {
+            conn.execute(
+                "INSERT INTO contents (msg_id, body, deleted) VALUES (?1, '', 1)",
+                params![msg.id],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO contents (msg_id, body, deleted) VALUES (?1, ?2, 0)",
+                params![msg.id, self.seal(&serde_json::to_string(&msg.content())?)?],
+            )?;
+        }
         Ok(true)
     }
 
@@ -479,23 +615,30 @@ impl Store {
         let tx = conn.transaction()?;
         let (last_seq, last_hash) = Self::chain_head_in(&tx, &msg.room)?;
         msg.sequence(last_seq + 1, &last_hash);
-        Self::append_in(&tx, msg)?;
+        self.append_in(&tx, msg)?;
         tx.commit()?;
         Ok(())
     }
 
-    fn row_to_message(row: &Row<'_>) -> rusqlite::Result<Message> {
+    fn row_to_message(&self, row: &Row<'_>) -> rusqlite::Result<Message> {
         let envelope: String = row.get("envelope")?;
         let body: Option<String> = row.get("body")?;
         let deleted: Option<i32> = row.get("deleted")?;
         let mut v: serde_json::Value =
             serde_json::from_str(&envelope).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let content: Content = match (body, deleted) {
-            (Some(b), Some(0)) => serde_json::from_str(&b).unwrap_or_default(),
-            _ => Content::default(),
+        let (content, tombstone) = match (body, deleted) {
+            (Some(b), Some(0)) => match self.unseal(&b) {
+                Some(plain) => (serde_json::from_str(&plain).unwrap_or_default(), false),
+                None => (Content::default(), true),
+            },
+            _ => (Content::default(), true),
         };
         if let Some(obj) = v.as_object_mut() {
-            obj.remove("content_hash");
+            if tombstone {
+                obj.insert("tombstone".into(), serde_json::Value::Bool(true));
+            } else {
+                obj.remove("content_hash");
+            }
             obj.insert("text".into(), serde_json::Value::String(content.text));
             obj.insert(
                 "action".into(),
@@ -514,7 +657,21 @@ impl Store {
              LEFT JOIN contents c ON c.msg_id = m.id
              WHERE m.room_id=?1 AND m.seq>?2 ORDER BY m.seq LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![room_id, after as i64, limit], Self::row_to_message)?;
+        let rows = stmt.query_map(params![room_id, after as i64, limit], |r| {
+            self.row_to_message(r)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Messages with `ts >= since` (RFC 3339), in order.
+    pub fn messages_from_ts(&self, room_id: &str, since: &str, limit: u32) -> Result<Vec<Message>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.envelope, c.body, c.deleted FROM messages m
+             LEFT JOIN contents c ON c.msg_id = m.id
+             WHERE m.room_id=?1 AND m.ts>=?2 ORDER BY m.seq LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![room_id, since, limit], |r| self.row_to_message(r))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -525,9 +682,83 @@ impl Store {
                 "SELECT m.envelope, c.body, c.deleted FROM messages m
                  LEFT JOIN contents c ON c.msg_id = m.id WHERE m.id=?1",
                 params![id],
-                Self::row_to_message,
+                |r| self.row_to_message(r),
             )
             .optional()?)
+    }
+
+    /// Every message that answers `msg_id`, in order.
+    pub fn replies_to(&self, room_id: &str, msg_id: &str) -> Result<Vec<Message>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.envelope, c.body, c.deleted FROM messages m
+             LEFT JOIN contents c ON c.msg_id = m.id
+             WHERE m.room_id=?1 AND m.reply_to=?2 ORDER BY m.seq",
+        )?;
+        let rows = stmt.query_map(params![room_id, msg_id], |r| self.row_to_message(r))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Who holds a task right now: the last claim not followed by a
+    /// release from the same member.
+    pub fn claim_holder(&self, room_id: &str, task_id: &str) -> Result<Option<String>> {
+        let mut holder: Option<String> = None;
+        for m in self.replies_to(room_id, task_id)? {
+            match m.kind {
+                MessageType::Claim if holder.is_none() => holder = Some(m.from.clone()),
+                MessageType::Release if holder.as_deref() == Some(m.from.as_str()) => holder = None,
+                _ => {}
+            }
+        }
+        Ok(holder)
+    }
+
+    /// Approves in a room for exactly this action hash, in order.
+    pub fn approvals_for(&self, room_id: &str, action_hash: &str) -> Result<Vec<Message>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.envelope, c.body, c.deleted FROM messages m
+             LEFT JOIN contents c ON c.msg_id = m.id
+             WHERE m.room_id=?1 AND m.type='approve'
+               AND json_extract(m.envelope, '$.action_hash')=?2
+               AND m.id NOT IN (SELECT msg_id FROM approvals_used)
+             ORDER BY m.seq",
+        )?;
+        let rows = stmt.query_map(params![room_id, action_hash], |r| self.row_to_message(r))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Spend an approve. Returns false if it was already spent.
+    pub fn approval_use(&self, msg_id: &str, action_hash: &str, now: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO approvals_used (msg_id, action_hash, used_at) VALUES (?1, ?2, ?3)",
+            params![msg_id, action_hash, now],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Retention: drop the content of messages older than `cutoff`
+    /// (RFC 3339). Envelopes stay; the chain is unchanged. Returns how
+    /// many were tombstoned.
+    pub fn tombstone_before(&self, room_id: &str, cutoff: &str) -> Result<u64> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE contents SET body='', deleted=1
+             WHERE deleted=0 AND msg_id IN (SELECT id FROM messages WHERE room_id=?1 AND ts<?2)",
+            params![room_id, cutoff],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// Delete one message's content (a GDPR delete). The envelope stays.
+    pub fn tombstone_message(&self, msg_id: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE contents SET body='', deleted=1 WHERE msg_id=?1 AND deleted=0",
+            params![msg_id],
+        )?;
+        Ok(n == 1)
     }
 
     pub fn message_count(&self, room_id: &str) -> Result<u64> {
@@ -709,6 +940,7 @@ mod tests {
             class: DataClass::Internal,
             paused: false,
             hold: false,
+            closed: false,
             home_node: "node".into(),
             home_hints: serde_json::Value::Null,
         }

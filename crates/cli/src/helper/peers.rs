@@ -10,7 +10,7 @@ use diavlos_core::{
 use tracing::{debug, info, warn};
 
 use super::Helper;
-use crate::net::{Link, Wire, SYNC_BATCH};
+use crate::net::{sync_signing_bytes, Link, Wire, SYNC_BATCH};
 
 /// Take every link other helpers open to us.
 pub async fn accept_loop(helper: Arc<Helper>) {
@@ -73,14 +73,21 @@ async fn handle(helper: &Arc<Helper>, link: &Arc<dyn Link>, req: Wire) -> Result
                 .store
                 .room_by_id(&room_id)?
                 .ok_or(Error::NotInRoom(room_id))?;
-            require_member_node(helper, &room, link)?;
-            helper.register_link(&room.id, link.clone()).await?;
+            // The message is signed by the member key; sequence_here checks
+            // the signature and the node binding.
             let msg = helper
                 .sequence_here(&room, message, Some(&link.remote_node()))
                 .await?;
+            helper.register_link(&room.id, link.clone()).await?;
             Ok(Wire::Sequenced { message: msg })
         }
-        Wire::Sync { room_id, have_seq } => {
+        Wire::Sync {
+            room_id,
+            name,
+            have_seq,
+            ts,
+            sig,
+        } => {
             let room = helper
                 .store
                 .room_by_id(&room_id)?
@@ -88,14 +95,31 @@ async fn handle(helper: &Arc<Helper>, link: &Arc<dyn Link>, req: Wire) -> Result
             if !helper.is_home(&room) {
                 return Err(Error::Denied("not the home of that room".into()));
             }
-            let member = require_member_node(helper, &room, link)?;
-            helper.register_link(&room.id, link.clone()).await?;
-            helper.store.touch_member(
-                &room.id,
-                &member.name,
-                Some(&link.remote_node()),
-                &now_ts(),
+            let member = helper
+                .store
+                .member_by_name(&room.id, &name)?
+                .filter(|m| !m.revoked)
+                .ok_or_else(|| Error::Denied("not a member of that room".into()))?;
+            let remote = link.remote_node();
+            member.key.verify(
+                &sync_signing_bytes(&room.id, &name, have_seq, &ts, &remote),
+                &sig,
             )?;
+            let age = chrono::DateTime::parse_from_rfc3339(&ts)
+                .map(|t| {
+                    (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .abs()
+                })
+                .unwrap_or(i64::MAX);
+            if age > 300 {
+                return Err(Error::Denied("sync request is too old".into()));
+            }
+            helper.node_check(&room, &member, &remote).await?;
+            helper.register_link(&room.id, link.clone()).await?;
+            helper
+                .store
+                .touch_member(&room.id, &member.name, Some(&remote), &now_ts())?;
             let messages = helper
                 .store
                 .messages_after(&room.id, have_seq, SYNC_BATCH)?;
@@ -133,17 +157,6 @@ async fn handle(helper: &Arc<Helper>, link: &Arc<dyn Link>, req: Wire) -> Result
     }
 }
 
-/// The member bound to the node on the other end of this link.
-fn require_member_node(helper: &Helper, room: &Room, link: &Arc<dyn Link>) -> Result<Member> {
-    let node = link.remote_node();
-    helper
-        .store
-        .members(&room.id)?
-        .into_iter()
-        .find(|m| m.node.as_deref() == Some(node.as_str()) && !m.revoked)
-        .ok_or_else(|| Error::Denied("this machine is not a member of that room".into()))
-}
-
 /// Home side: let a joiner in with a signed invite.
 async fn handle_join(
     helper: &Arc<Helper>,
@@ -177,7 +190,10 @@ async fn handle_join(
     }
     profile.verify()?;
     let key = profile.key;
-    let existing = helper.store.member_by_name(&room.id, &inv.name)?;
+    let existing = helper
+        .store
+        .member_by_name(&room.id, &inv.name)?
+        .filter(|m| !m.revoked);
     let rejoin = matches!(&existing, Some(m) if m.key == key);
     if let Some(other) = helper.store.member_by_key(&room.id, &key)? {
         if other.name != inv.name {
@@ -243,6 +259,11 @@ async fn handle_join(
             .push_to_members(&room, vec![msg], Some(&remote))
             .await;
         info!(room = %room.id, member = %member.name, node = %remote, "member joined");
+        helper.emit(
+            "member_joined",
+            Some(&room.id),
+            serde_json::json!({"name": member.name, "role": member.role, "kind": member.kind, "node": remote}),
+        );
     }
     let mut room_out = room.clone();
     room_out.home_hints = helper.net.hints();
@@ -269,6 +290,9 @@ pub async fn room_link_task(helper: Arc<Helper>, room_id: String) {
         let Ok(Some(room)) = helper.store.room_by_id(&room_id) else {
             return;
         };
+        if room.closed {
+            return;
+        }
         match connect_home(&helper, &room).await {
             Ok(link) => {
                 backoff = retry;
@@ -278,9 +302,17 @@ pub async fn room_link_task(helper: Arc<Helper>, room_id: String) {
                     .await
                     .insert(room_id.clone(), link.clone());
                 info!(room = %room.id, "linked to home");
+                helper.emit(
+                    "link_up",
+                    Some(&room.id),
+                    serde_json::json!({"home": room.home_node}),
+                );
+                metrics::gauge!("diavlos_home_links").increment(1.0);
                 let outcome = serve_home_link(&helper, &room, &link, &waker, &mut shutdown).await;
                 helper.home_links.lock().await.remove(&room_id);
                 link.close();
+                metrics::gauge!("diavlos_home_links").decrement(1.0);
+                helper.emit("link_down", Some(&room.id), serde_json::Value::Null);
                 match outcome {
                     Ok(()) => return,
                     Err(e) => debug!(room = %room.id, error = %e, "home link ended"),
@@ -342,6 +374,9 @@ async fn serve_home_link(
                 if need_sync {
                     sync_from_home(helper, room, link).await?;
                 }
+                if helper.store.room_by_id(&room.id)?.map(|r| r.closed).unwrap_or(true) {
+                    return Ok(());
+                }
             }
             _ = waker.notified() => {
                 flush_outbox(helper, room, link).await?;
@@ -357,11 +392,27 @@ async fn serve_home_link(
 
 /// Pull everything after our chain head from the home.
 pub async fn sync_from_home(helper: &Helper, room: &Room, link: &Arc<dyn Link>) -> Result<()> {
+    let lm = helper
+        .store
+        .local_members(&room.id)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::NotInRoom(room.name.clone()))?;
+    let id = helper.identity(&lm.identity).await?;
+    let me = helper.net.node_id();
     loop {
         let (have, _) = helper.store.chain_head(&room.id)?;
+        let ts = now_ts();
+        let sig = diavlos_core::Signer::sign(
+            id.as_ref(),
+            &sync_signing_bytes(&room.id, &lm.member.name, have, &ts, &me),
+        );
         let req = Wire::Sync {
             room_id: room.id.clone(),
+            name: lm.member.name.clone(),
             have_seq: have,
+            ts,
+            sig,
         };
         match link.request(&req).await?.into_result()? {
             Wire::Messages {

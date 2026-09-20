@@ -1,0 +1,42 @@
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths: [site/**, README.md, docs/**, skills/**, SECURITY.md]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble the site and llms-full.txt
+        run: |
+          mkdir -p out
+          cp site/index.html site/llms.txt out/
+          cp security.txt out/
+          mkdir -p out/.well-known && cp security.txt out/.well-known/
+          {
+            echo "# Diavlos: full text for LLMs"; echo
+            for f in README.md skills/diavlos/SKILL.md docs/THREAT-MODEL.md docs/RELAY.md SECURITY.md; do
+              echo; echo "<!-- $f -->"; echo; cat "$f"; echo
+            done
+          } > out/llms-full.txt
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

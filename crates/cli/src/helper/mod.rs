@@ -9,22 +9,29 @@
 mod local;
 mod peers;
 
-use std::collections::{HashMap, HashSet};
+mod keys;
+
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use diavlos_client::proto::Event;
+use diavlos_client::Paths;
 use diavlos_core::{
-    message::now_ts, AgentInfo, DefaultHook, Draft, Error, Identity, Kind, Member, Message,
-    MessageType, Policy, PolicyHook, Result, Room, Store, PROTOCOL_VERSION,
+    message::now_ts, AgentInfo, ControlOp, DefaultHook, Draft, Error, Identity, Kind, Member,
+    Message, MessageType, Policy, PolicyHook, Result, Room, Store, PROTOCOL_VERSION,
 };
+use serde_json::Value;
 use tokio::sync::{broadcast, watch, Mutex, Notify};
 use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::net::iroh::IrohTransport;
 use crate::net::{Link, Transport};
-use crate::paths::Paths;
+
+/// How many events `events` (without --follow) can replay.
+const EVENT_LOG_CAP: usize = 1000;
 
 /// Home side: room id -> member node id -> link.
 type RoomLinks = HashMap<String, HashMap<String, Arc<dyn Link>>>;
@@ -50,6 +57,10 @@ pub struct Helper {
     alerted: Mutex<HashSet<String>>,
     shutdown: watch::Sender<bool>,
     policy_hook: DefaultHook,
+    /// Everything the helper does, as a stream and a short log.
+    events: broadcast::Sender<Event>,
+    event_log: std::sync::Mutex<VecDeque<Event>>,
+    pub metrics_addr: Option<String>,
 }
 
 impl Helper {
@@ -70,6 +81,131 @@ impl Helper {
         let _ = self.notify.send((room_id.to_string(), seq));
     }
 
+    /// Record something the helper did. Never content, never keys.
+    pub fn emit(&self, kind: &str, room: Option<&str>, detail: Value) {
+        let ev = Event {
+            ts: now_ts(),
+            kind: kind.to_string(),
+            room: room.map(String::from),
+            detail,
+        };
+        if let Ok(mut log) = self.event_log.lock() {
+            if log.len() >= EVENT_LOG_CAP {
+                log.pop_front();
+            }
+            log.push_back(ev.clone());
+        }
+        metrics::counter!("diavlos_events_total", "kind" => kind.to_string()).increment(1);
+        let _ = self.events.send(ev);
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
+    }
+
+    pub fn recent_events(&self) -> Vec<Event> {
+        self.event_log
+            .lock()
+            .map(|l| l.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Does this helper refuse to hold this class of data?
+    pub fn refuses_class(&self, class: diavlos_core::DataClass) -> bool {
+        self.config.helper.refuse_classes.contains(&class)
+    }
+
+    /// Apply a control message to local state. Both the home (after it
+    /// sequences one) and members (when one arrives) do this.
+    pub fn apply_control(&self, room: &Room, op: &ControlOp) -> Result<()> {
+        match op {
+            ControlOp::Grant { name, role, until } => {
+                self.store
+                    .set_member_role(&room.id, name, *role, until.as_deref())?;
+            }
+            ControlOp::Pause | ControlOp::Resume => {
+                let mut r = room.clone();
+                r.paused = matches!(op, ControlOp::Pause);
+                self.store.update_room(&r)?;
+            }
+            ControlOp::Mute { name } => {
+                self.store.set_member_muted(&room.id, name, true)?;
+            }
+            ControlOp::Unmute { name } => {
+                self.store.set_member_muted(&room.id, name, false)?;
+            }
+            ControlOp::Revoke { name } => {
+                self.store.set_member_revoked(&room.id, name)?;
+            }
+            ControlOp::Hold { on } => {
+                let mut r = room.clone();
+                r.hold = *on;
+                self.store.update_room(&r)?;
+            }
+            ControlOp::Rotated { new_room_id } => {
+                if !self.is_home(room) {
+                    let mut r = room.clone();
+                    r.closed = true;
+                    r.paused = true;
+                    r.about = format!("rotated to {new_room_id}; re-invite needed");
+                    self.store.update_room(&r)?;
+                    let stamp = now_ts().replace([':', '-'], "");
+                    let _ = self.store.rename_room(
+                        &room.id,
+                        &format!("{}-rotated-{}", room.name, &stamp[..15.min(stamp.len())]),
+                    );
+                }
+            }
+        }
+        self.emit(
+            "control",
+            Some(&room.id),
+            serde_json::to_value(op).unwrap_or(Value::Null),
+        );
+        Ok(())
+    }
+
+    /// Is a member helper's node online in a room right now?
+    pub async fn node_online(&self, room_id: &str, node: &str) -> bool {
+        self.links
+            .lock()
+            .await
+            .get(room_id)
+            .and_then(|m| m.get(node))
+            .map(|l| !l.is_closed())
+            .unwrap_or(false)
+    }
+
+    /// One key, two machines: a member seen from a node other than the one
+    /// it is bound to. If the bound node is still online, refuse and tell
+    /// the owner. If it is not, the member moved; bind the new node.
+    pub async fn node_check(&self, room: &Room, member: &Member, seen: &str) -> Result<()> {
+        let Some(bound) = &member.node else {
+            return Ok(());
+        };
+        if bound == seen {
+            return Ok(());
+        }
+        if self.node_online(&room.id, bound).await {
+            self.alert_key_reuse(room, member, seen).await;
+            return Err(Error::Denied(format!(
+                "the key for {} is already online from another machine",
+                member.name
+            )));
+        }
+        self.store
+            .touch_member(&room.id, &member.name, Some(seen), &now_ts())?;
+        self.store.clear_member_node(&room.id, &member.name)?;
+        self.store
+            .touch_member(&room.id, &member.name, Some(seen), &now_ts())?;
+        self.emit(
+            "member_moved",
+            Some(&room.id),
+            serde_json::json!({"name": member.name, "from": bound, "to": seen}),
+        );
+        Ok(())
+    }
+
     /// Load a key file, or make one on first use. `default` is a human
     /// (the person who installed Diavlos); any other label is an agent.
     pub async fn identity(&self, label: &str) -> Result<Arc<Identity>> {
@@ -84,7 +220,7 @@ impl Helper {
         }
         let path = self.paths.key(label);
         let id = if path.exists() {
-            Identity::load(&path)?
+            keys::load_identity(&self.paths, label, self.config.helper.keychain)?
         } else {
             let (name, kind) = if label == "default" {
                 let user = std::env::var("USER")
@@ -98,8 +234,13 @@ impl Helper {
                 (label.to_string(), Kind::Agent)
             };
             let id = Identity::generate(&name, kind);
-            id.save(&path)?;
+            keys::save_identity(&self.paths, label, &id, self.config.helper.keychain)?;
             info!(identity = label, kind = %kind, fingerprint = %id.public().fingerprint(), "made a new key");
+            self.emit(
+                "key_made",
+                None,
+                serde_json::json!({"identity": label, "kind": kind}),
+            );
             id
         };
         let id = Arc::new(id);
@@ -158,6 +299,11 @@ impl Helper {
                 }
             }
         }
+        if msg.kind == MessageType::Control {
+            if let Ok(op) = ControlOp::from_message(msg) {
+                self.apply_control(room, &op)?;
+            }
+        }
         Ok(member)
     }
 
@@ -167,7 +313,29 @@ impl Helper {
         let mut last = 0;
         for msg in messages {
             self.verify_incoming(room, msg)?;
-            if self.store.append(msg)? {
+            let stored = if self.refuses_class(msg.class) && !msg.tombstone {
+                // Refuse to store the content; keep the envelope so the
+                // chain stays whole.
+                let t = msg.tombstone();
+                let written = self.store.append(&t)?;
+                if written {
+                    self.emit(
+                        "refused_class",
+                        Some(&room.id),
+                        serde_json::json!({"seq": msg.seq, "class": msg.class}),
+                    );
+                }
+                written
+            } else {
+                self.store.append(msg)?
+            };
+            if stored {
+                metrics::counter!("diavlos_messages_total", "how" => "received").increment(1);
+                self.emit(
+                    "message",
+                    Some(&room.id),
+                    serde_json::json!({"seq": msg.seq, "id": msg.id, "from": msg.from, "type": msg.kind}),
+                );
                 self.notify_room(&room.id, msg.seq);
             }
             last = msg.seq;
@@ -194,24 +362,36 @@ impl Helper {
             .member_by_name(&room.id, &msg.from)?
             .ok_or_else(|| Error::Denied(format!("unknown sender {}", msg.from)))?;
         msg.verify(&member.key)?;
-        if let (Some(bound), Some(seen)) = (&member.node, from_node) {
-            if bound != seen {
-                self.alert_key_reuse(room, &member, seen).await;
-                return Err(Error::Denied(format!(
-                    "the key for {} is already online from another machine",
-                    member.name
-                )));
-            }
+        if let Some(seen) = from_node {
+            self.node_check(room, &member, seen).await?;
         }
-        if room.paused {
-            return Err(Error::RoomPaused(room.name.clone()));
+        if room.closed {
+            return Err(Error::Denied(format!(
+                "room {} was rotated; ask the owner for a new invite",
+                room.name
+            )));
         }
         let is_owner = member.key == room.owner;
+        if room.paused && !(is_owner && msg.kind == MessageType::Control) {
+            return Err(Error::RoomPaused(room.name.clone()));
+        }
         member.check_may_send(msg.kind, is_owner, &now)?;
         msg.check_size()?;
         if msg.room != room.id {
             return Err(Error::Invalid("message is for another room".into()));
         }
+        if self.refuses_class(msg.class) {
+            return Err(Error::Denied(format!(
+                "this room's home refuses {} messages",
+                msg.class
+            )));
+        }
+        self.check_typed(room, &msg)?;
+        let control_op = if msg.kind == MessageType::Control {
+            Some(ControlOp::from_message(&msg)?)
+        } else {
+            None
+        };
         let policy = self.policy(room);
         self.policy_hook.check(&policy, &msg)?;
         let alert = self
@@ -221,6 +401,15 @@ impl Helper {
         self.store
             .touch_member(&room.id, &member.name, from_node, &now)?;
         info!(room = %room.id, seq = msg.seq, from = %msg.from, kind = %msg.kind, "sequenced");
+        metrics::counter!("diavlos_messages_total", "how" => "sequenced").increment(1);
+        self.emit(
+            "message",
+            Some(&room.id),
+            serde_json::json!({"seq": msg.seq, "id": msg.id, "from": msg.from, "type": msg.kind}),
+        );
+        if let Some(op) = &control_op {
+            self.apply_control(room, op)?;
+        }
         self.notify_room(&room.id, msg.seq);
         if alert {
             self.system_message(
@@ -236,6 +425,64 @@ impl Helper {
         self.push_to_members(room, vec![msg.clone()], from_node)
             .await;
         Ok(msg)
+    }
+
+    /// The rules that come with a type: claims are first-come, releases
+    /// need the holder, approves must match the exact action, replies must
+    /// answer something real.
+    pub(crate) fn check_typed(&self, room: &Room, msg: &Message) -> Result<()> {
+        let target = match &msg.reply_to {
+            Some(id) => match self.store.message_by_id(id)? {
+                Some(t) => Some(t),
+                None => return Err(Error::Invalid(format!("no message {id} in this room"))),
+            },
+            None => None,
+        };
+        match msg.kind {
+            MessageType::Claim => {
+                let t = target.ok_or_else(|| {
+                    Error::Invalid("a claim needs reply_to set to the task id".into())
+                })?;
+                if t.kind != MessageType::Task {
+                    return Err(Error::Invalid(format!("{} is not a task", t.id)));
+                }
+                match self.store.claim_holder(&room.id, &t.id)? {
+                    Some(h) if h == msg.from => {
+                        Err(Error::Denied("you already hold this task".into()))
+                    }
+                    Some(h) => Err(Error::Denied(format!("already claimed by {h}"))),
+                    None => Ok(()),
+                }
+            }
+            MessageType::Release => {
+                let t = target.ok_or_else(|| {
+                    Error::Invalid("a release needs reply_to set to the task id".into())
+                })?;
+                match self.store.claim_holder(&room.id, &t.id)? {
+                    Some(h) if h == msg.from => Ok(()),
+                    _ => Err(Error::Denied("you do not hold this task".into())),
+                }
+            }
+            MessageType::Approve => {
+                let t = target.ok_or_else(|| {
+                    Error::Invalid("an approve needs reply_to set to the question".into())
+                })?;
+                let action = t.action.as_ref().ok_or_else(|| {
+                    Error::Denied("that question carries no action to approve".into())
+                })?;
+                if msg.action_hash.as_deref() != Some(action.hash().as_str()) {
+                    return Err(Error::Denied(
+                        "approve does not sign the exact action".into(),
+                    ));
+                }
+                if msg.once != Some(true) || msg.expires.is_none() {
+                    return Err(Error::Denied("an approve must expire and work once".into()));
+                }
+                Ok(())
+            }
+            MessageType::Deny | MessageType::Reply => Ok(()),
+            _ => Ok(()),
+        }
     }
 
     /// Home side: a helper notice signed by the owner key. Best effort.
@@ -258,6 +505,11 @@ impl Helper {
             warn!(room = %room.id, error = %e, "could not store system message");
             return;
         }
+        self.emit(
+            "system",
+            Some(&room.id),
+            serde_json::json!({"seq": msg.seq, "text": text}),
+        );
         self.notify_room(&room.id, msg.seq);
         self.push_to_members(room, vec![msg], None).await;
     }
@@ -268,6 +520,11 @@ impl Helper {
             return;
         }
         warn!(room = %room.id, member = %member.name, node = %node, "same key seen from a second machine; refused");
+        self.emit(
+            "key_reuse",
+            Some(&room.id),
+            serde_json::json!({"name": member.name, "node": node}),
+        );
         self.system_message(
             room,
             &format!(
@@ -305,6 +562,7 @@ impl Helper {
                 };
                 if let Err(e) = link.request(&req).await {
                     warn!(node = %node, error = %e, "push failed; member will sync later");
+                    metrics::counter!("diavlos_push_failures_total").increment(1);
                 }
             });
         }
@@ -362,12 +620,13 @@ impl Helper {
     }
 
     /// Build a message from a local identity as a member of a room.
-    fn draft_from(
+    pub(crate) fn draft_from(
         &self,
         room: &Room,
         member: &Member,
         identity: &Identity,
-        draft: crate::proto::DraftWire,
+        draft: diavlos_client::proto::DraftWire,
+        extra: Draft,
     ) -> Result<Message> {
         let agent = if identity.kind == Kind::Human {
             None
@@ -391,7 +650,9 @@ impl Helper {
                 trace: draft.trace,
                 class: Some(draft.class.unwrap_or(room.class)),
                 agent,
-                ..Default::default()
+                action_hash: extra.action_hash,
+                expires: extra.expires,
+                once: extra.once,
             },
             identity,
         )
@@ -416,7 +677,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
 
 async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
     // Refuse to run twice.
-    let client = crate::client::Client::new(paths.clone());
+    let client = diavlos_client::Client::new(paths.clone());
     if client.is_running().await {
         eprintln!("a helper is already running for {}", paths.home.display());
         return Ok(());
@@ -426,7 +687,12 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(paths.socket_file());
     }
 
-    let store = Store::open(&paths.db()).context("open inbox")?;
+    let inbox_key = if config.helper.encrypt_inbox {
+        Some(keys::inbox_key(&paths, config.helper.keychain).context("inbox key")?)
+    } else {
+        None
+    };
+    let store = Store::open_with_key(&paths.db(), inbox_key).context("open inbox")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -455,8 +721,24 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
     let net: Arc<dyn Transport> = Arc::new(net);
     info!(node = %net.node_id(), version = diavlos_core::VERSION, protocol = PROTOCOL_VERSION, "helper up");
 
+    let metrics_addr = if config.helper.metrics_addr.trim().is_empty() {
+        None
+    } else {
+        let addr: std::net::SocketAddr =
+            config.helper.metrics_addr.parse().context("metrics_addr")?;
+        if !addr.ip().is_loopback() {
+            anyhow::bail!("metrics_addr must be on localhost");
+        }
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .with_http_listener(addr)
+            .install()
+            .context("metrics listener")?;
+        Some(addr.to_string())
+    };
+
     let (shutdown, _) = watch::channel(false);
     let (notify, _) = broadcast::channel(1024);
+    let (events, _) = broadcast::channel(1024);
     let helper = Arc::new(Helper {
         paths: paths.clone(),
         config,
@@ -471,7 +753,16 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         alerted: Mutex::new(HashSet::new()),
         shutdown,
         policy_hook: DefaultHook,
+        events,
+        event_log: std::sync::Mutex::new(VecDeque::new()),
+        metrics_addr,
     });
+    helper.emit(
+        "helper_up",
+        None,
+        serde_json::json!({"node": helper.net.node_id(), "version": diavlos_core::VERSION}),
+    );
+    tokio::spawn(retention_loop(helper.clone()));
 
     // Links from other helpers.
     tokio::spawn(peers::accept_loop(helper.clone()));
@@ -490,6 +781,7 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => info!("ctrl-c"),
         _ = rx.changed() => info!("stop requested"),
     }
+    helper.emit("helper_down", None, Value::Null);
     helper.net.shutdown().await;
     #[cfg(unix)]
     {
@@ -499,6 +791,48 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
     // Let the log flush.
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
+}
+
+/// Retention per room: 30 days, 7 years, or none. The helper enforces it.
+/// A legal hold freezes it.
+async fn retention_loop(helper: Arc<Helper>) {
+    let every = std::env::var("DIAVLOS_RETENTION_CHECK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(helper.config.helper.retention_check_secs)
+        .max(1);
+    let mut shutdown = helper.shutdown_signal();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(every)) => {}
+            _ = shutdown.changed() => return,
+        }
+        let Ok(rooms) = helper.store.list_rooms() else {
+            continue;
+        };
+        for room in rooms {
+            let Some(days) = room.retention_days else {
+                continue;
+            };
+            if room.hold {
+                continue;
+            }
+            let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            match helper.store.tombstone_before(&room.id, &cutoff) {
+                Ok(0) => {}
+                Ok(n) => {
+                    info!(room = %room.id, tombstoned = n, "retention");
+                    helper.emit(
+                        "retention",
+                        Some(&room.id),
+                        serde_json::json!({"tombstoned": n, "before": cutoff}),
+                    );
+                }
+                Err(e) => warn!(room = %room.id, error = %e, "retention failed"),
+            }
+        }
+    }
 }
 
 fn init_logging(paths: &Paths, level: &str) -> anyhow::Result<()> {

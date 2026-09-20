@@ -11,9 +11,35 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::paths::Paths;
 use crate::proto::{Request, Response};
 
+/// A stream of JSON lines from a streaming request (events, watch).
+pub struct LineStream {
+    reader: BufReader<Stream>,
+}
+
+impl LineStream {
+    /// The next line, or `None` when the helper closed the stream.
+    pub async fn next(&mut self) -> Result<Option<Value>> {
+        let mut buf = String::new();
+        let n = self.reader.read_line(&mut buf).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let resp: Response = serde_json::from_str(buf.trim_end())?;
+        if resp.ok {
+            Ok(Some(resp.result))
+        } else {
+            Err(Error::from_code(
+                resp.code.unwrap_or(1),
+                resp.error.as_deref().unwrap_or("unknown error"),
+            ))
+        }
+    }
+}
+
 /// How long to wait for a freshly started helper to answer.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone)]
 pub struct Client {
     paths: Paths,
 }
@@ -55,8 +81,41 @@ impl Client {
         self.connect_once().await.is_ok()
     }
 
+    /// The `diavlos` binary: this process if it is one, else `DIAVLOS_BIN`,
+    /// else `diavlos` on the PATH.
+    fn helper_binary() -> Result<PathBuf> {
+        if let Ok(exe) = std::env::current_exe() {
+            if exe
+                .file_stem()
+                .map(|s| s.to_string_lossy().starts_with("diavlos"))
+                .unwrap_or(false)
+            {
+                return Ok(exe);
+            }
+        }
+        if let Some(p) = std::env::var_os("DIAVLOS_BIN") {
+            return Ok(PathBuf::from(p));
+        }
+        let name = if cfg!(windows) {
+            "diavlos.exe"
+        } else {
+            "diavlos"
+        };
+        if let Some(path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path) {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        Err(Error::Other(
+            "cannot find the diavlos binary; set DIAVLOS_BIN or put diavlos on your PATH".into(),
+        ))
+    }
+
     fn spawn_helper(&self) -> Result<()> {
-        let exe: PathBuf = std::env::current_exe()?;
+        let exe = Self::helper_binary()?;
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("--home")
             .arg(&self.paths.home)
@@ -93,6 +152,20 @@ impl Client {
             Ok(stream) => Ok(Some(Self::call_on(stream, req).await?)),
             Err(_) => Ok(None),
         }
+    }
+
+    /// Open a streaming request. Lines keep coming until the helper or the
+    /// caller closes the connection.
+    pub async fn stream(&self, req: &Request) -> Result<LineStream> {
+        let stream = self.connect().await?;
+        let mut line = serde_json::to_string(req)?;
+        line.push('\n');
+        let mut writer = &stream;
+        writer.write_all(line.as_bytes()).await?;
+        writer.flush().await?;
+        Ok(LineStream {
+            reader: BufReader::new(stream),
+        })
     }
 
     async fn call_on(stream: Stream, req: &Request) -> Result<Value> {

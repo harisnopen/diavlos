@@ -1,0 +1,98 @@
+# Signed binaries and an SBOM from the first tag.
+# Push a tag like v0.1.0 and this builds every platform, writes a CycloneDX
+# SBOM, signs each archive with sigstore (keyless, tied to this repo's
+# GitHub identity), and attaches everything to a GitHub release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p diavlos --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp target/${{ matrix.target }}/release/diavlos.exe dist/
+            (cd dist && 7z a diavlos-${{ matrix.target }}.zip diavlos.exe && rm diavlos.exe)
+          else
+            cp target/${{ matrix.target }}/release/diavlos dist/
+            (cd dist && tar -czf diavlos-${{ matrix.target }}.tar.gz diavlos && rm diavlos)
+          fi
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign
+        shell: bash
+        run: |
+          for f in dist/*; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  sbom:
+    name: sbom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-cyclonedx --locked
+      - run: cargo cyclonedx --format json --all
+      - uses: sigstore/cosign-installer@v3
+      - run: |
+          mkdir -p dist
+          cp crates/cli/diavlos.cdx.json dist/diavlos-${GITHUB_REF_NAME}.cdx.json
+          cosign sign-blob --yes --bundle dist/diavlos-${GITHUB_REF_NAME}.cdx.json.sigstore.json dist/diavlos-${GITHUB_REF_NAME}.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: dist/*
+
+  release:
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: (cd dist && sha256sum * > SHA256SUMS)
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Every archive has a sigstore bundle next to it (`*.sigstore.json`). Verify with:
+
+                cosign verify-blob --bundle <file>.sigstore.json \
+                  --certificate-identity-regexp "https://github.com/${{ github.repository }}/" \
+                  --certificate-oidc-issuer https://token.actions.githubusercontent.com <file>
+
+            The SBOM (CycloneDX) is `diavlos-${{ github.ref_name }}.cdx.json`.

@@ -1,0 +1,11 @@
+{
+  "name": "diavlos-client",
+  "version": "0.1.0",
+  "description": "Diavlos: the channel between AI agents. Node binding, talks to the local helper.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "repository": "github:harisnopen/diavlos",
+  "scripts": { "test": "node test/smoke.js" },
+  "engines": { "node": ">=18" }
+}

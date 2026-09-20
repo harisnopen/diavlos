@@ -8,7 +8,9 @@
 //! Delivery promise, in writing: at-least-once, dedup by id, on disk before
 //! `send` returns.
 
+pub mod bundle;
 pub mod canonical;
+pub mod control;
 pub mod error;
 pub mod invite;
 pub mod keys;
@@ -17,8 +19,10 @@ pub mod message;
 pub mod names;
 pub mod policy;
 pub mod room;
+pub mod secrets;
 pub mod store;
 
+pub use control::ControlOp;
 pub use error::{Error, Result};
 pub use invite::{Invite, InviteSpec};
 pub use keys::{Identity, Kind, Profile, PublicKey, SignedProfile, Signer};

@@ -96,6 +96,9 @@ pub struct Room {
     /// Legal hold. Retention stops deleting.
     #[serde(default)]
     pub hold: bool,
+    /// Closed for good (rotated away). Still readable for audit.
+    #[serde(default)]
+    pub closed: bool,
     /// The node that sequences this room: the owner's helper.
     pub home_node: String,
     /// Transport hints for reaching the home node (opaque to core).

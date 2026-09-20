@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diavlos</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1b1b1b; --muted:#6b6b6b; --line:#e2e2de; --card:#fff; --accent:#0b5fff; --warn:#b3261e; --ok:#1b7f3b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141416; --fg:#ececec; --muted:#9a9a9a; --line:#2b2b2f; --card:#1d1d21; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header b { font-size:17px; }
+  header span { color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 50px); }
+  nav { border-right:1px solid var(--line); padding:12px; }
+  nav button { display:block; width:100%; text-align:left; padding:8px 10px; margin-bottom:4px; border:1px solid transparent; background:transparent; color:var(--fg); border-radius:8px; cursor:pointer; font:inherit; }
+  nav button.on { border-color:var(--line); background:var(--card); }
+  section { padding:12px 16px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+  #who { display:flex; gap:8px; flex-wrap:wrap; font-size:13px; color:var(--muted); }
+  #who span { border:1px solid var(--line); border-radius:999px; padding:2px 10px; }
+  #who span.online { border-color:var(--ok); }
+  #log { flex:1; overflow:auto; display:flex; flex-direction:column; gap:8px; }
+  .m { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 12px; }
+  .m .h { font-size:12px; color:var(--muted); display:flex; gap:8px; flex-wrap:wrap; }
+  .m .h b { color:var(--fg); }
+  .m .t { white-space:pre-wrap; word-break:break-word; }
+  .m.question { border-color:var(--accent); }
+  .m.approve { border-color:var(--ok); }
+  .m.deny { border-color:var(--warn); }
+  .m.system, .m.control { opacity:.7; }
+  .m .a { margin-top:6px; display:flex; gap:8px; }
+  form { display:flex; gap:8px; }
+  input, select, button.send { font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); }
+  input[type=text] { flex:1; }
+  button.send, .a button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; }
+  .a button.no { background:var(--warn); }
+  #err { color:var(--warn); font-size:13px; min-height:1em; }
+  @media (max-width: 720px) { main { grid-template-columns: 1fr; } nav { border-right:0; border-bottom:1px solid var(--line); display:flex; gap:6px; overflow:auto; } nav button { width:auto; } }
+</style>
+</head>
+<body>
+<header><b>Diavlos</b><span id="me"></span><span id="live">connecting…</span></header>
+<main>
+  <nav id="rooms"></nav>
+  <section>
+    <div id="who"></div>
+    <div id="log"></div>
+    <div id="err"></div>
+    <form id="f">
+      <select id="type"><option>chat</option><option>task</option><option>question</option><option>reply</option><option>done</option></select>
+      <input type="text" id="text" placeholder="Say something to the agents…" autocomplete="off">
+      <button class="send">Send</button>
+    </form>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let room = null, seen = new Set();
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({headers: {'content-type': 'application/json'}}, opts || {}));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function render(m) {
+  if (seen.has(m.id)) return; seen.add(m.id);
+  const d = document.createElement('div');
+  d.className = 'm ' + m.type;
+  let h = `<span>#${m.seq}</span><b>${esc(m.from)}</b><span>${esc(m.type)}</span>`;
+  if (m.to) h += `<span>→ ${esc(m.to)}</span>`;
+  if (m.reply_to) h += `<span>re ${esc(m.reply_to)}</span>`;
+  h += `<span>${esc(m.ts)}</span>`;
+  let t = m.tombstone ? '(content removed)' : esc(m.text);
+  if (m.action) t += `<div><code>${esc(m.action.verb)} ${esc(m.action.target)} ${esc(JSON.stringify(m.action.params || {}))}</code></div>`;
+  d.innerHTML = `<div class="h">${h}</div><div class="t">${t}</div>`;
+  if (m.type === 'question' && m.action) {
+    const a = document.createElement('div'); a.className = 'a';
+    const yes = document.createElement('button'); yes.textContent = 'Approve exactly this';
+    yes.onclick = () => act('approve', {msg_id: m.id});
+    const no = document.createElement('button'); no.textContent = 'Deny'; no.className = 'no';
+    no.onclick = () => { const reason = prompt('Why?') || 'no'; act('deny', {msg_id: m.id, reason}); };
+    a.append(yes, no); d.append(a);
+  }
+  $('#log').append(d);
+  $('#log').scrollTop = $('#log').scrollHeight;
+}
+async function act(what, body) {
+  $('#err').textContent = '';
+  try { await api(`/api/rooms/${room}/${what}`, {method: 'POST', body: JSON.stringify(body)}); }
+  catch (e) { $('#err').textContent = e.message; }
+}
+async function load() {
+  const st = await api('/api/status');
+  $('#me').textContent = `node ${st.node.slice(0, 10)}…`;
+  const nav = $('#rooms'); nav.innerHTML = '';
+  for (const r of st.rooms) {
+    const b = document.createElement('button');
+    b.textContent = r.name + (r.paused ? ' (paused)' : '');
+    b.className = r.name === room ? 'on' : '';
+    b.onclick = () => open(r.name);
+    nav.append(b);
+  }
+  if (!room && st.rooms.length) open(st.rooms[0].name);
+}
+async function open(name) {
+  room = name; seen = new Set(); $('#log').innerHTML = '';
+  for (const b of $('#rooms').children) b.className = b.textContent.startsWith(name) ? 'on' : '';
+  try {
+    const who = await api(`/api/rooms/${room}/who`);
+    $('#who').innerHTML = who.map(w => `<span class="${w.online ? 'online' : ''}" title="${esc(w.key)}">${esc(w.name)} · ${esc(w.kind)} · ${esc(w.role)} · ${esc(w.fingerprint)}</span>`).join('');
+    const r = await api(`/api/rooms/${room}/messages?since=1`);
+    for (const m of r.messages) render(m);
+  } catch (e) { $('#err').textContent = e.message; }
+}
+$('#f').onsubmit = async e => {
+  e.preventDefault();
+  const text = $('#text').value.trim(); if (!text || !room) return;
+  await act('send', {text, type: $('#type').value});
+  $('#text').value = '';
+};
+function live() {
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onopen = () => $('#live').textContent = 'live';
+  ws.onclose = () => { $('#live').textContent = 'reconnecting…'; setTimeout(live, 2000); };
+  ws.onmessage = async ev => {
+    const e = JSON.parse(ev.data);
+    if (e.kind === 'message' && room) {
+      try { const r = await api(`/api/rooms/${room}/messages?since=${e.detail.seq}`); for (const m of r.messages) render(m); } catch (_) {}
+    }
+    if (['room_made', 'room_joined', 'control', 'member_joined'].includes(e.kind)) load();
+  };
+}
+load().then(live).catch(e => $('#err').textContent = e.message);
+</script>
+</body>
+</html>

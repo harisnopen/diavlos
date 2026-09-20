@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use diavlos_core::{Error, Result};
 use iroh::endpoint::{presets, Connection, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 
@@ -148,6 +148,28 @@ impl Transport for IrohTransport {
 
     async fn accept(&self) -> Option<Arc<dyn Link>> {
         self.incoming.lock().await.recv().await
+    }
+
+    fn network_info(&self) -> Value {
+        let relays: Vec<Value> = self
+            .endpoint
+            .home_relay_status()
+            .get()
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "url": r.url().to_string(),
+                    "connected": r.is_connected(),
+                    "last_error": r.last_error().map(|e| e.to_string()),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "node": self.endpoint.id().to_string(),
+            "addr": self.endpoint.addr(),
+            "relays": relays,
+            "bound": self.endpoint.bound_sockets().iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        })
     }
 
     async fn shutdown(&self) {

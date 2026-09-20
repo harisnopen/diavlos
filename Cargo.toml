@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli", "crates/enterprise"]
+members = ["crates/core", "crates/client", "crates/cli", "crates/enterprise"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,6 +38,16 @@ schemars = "1"
 futures = "0.3"
 async-trait = "0.1"
 libc = "0.2"
+regex = "1"
+chacha20poly1305 = "0.11"
+keyring = "4"
+axum = { version = "0.8", features = ["ws"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
+fs4 = "1"
+windows-service = "0.8"
+diavlos-client = { path = "crates/client", version = "0.1.0" }
 
 [profile.release]
 lto = "thin"

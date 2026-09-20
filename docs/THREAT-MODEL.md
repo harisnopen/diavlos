@@ -19,16 +19,17 @@ ids from that review.
 |---|---|---|
 | R1 | An invite is pasted in the wrong place and used from another machine. | `invite --for <node-id>` pins an invite to one machine. A leaked invite is then useless anywhere else. |
 | R4 | A cloned VM or a copied `~/.diavlos` folder makes two "agent-b" with one key. | The helper refuses a second machine showing up with a key already online in the room, and tells the owner with a system message. |
-| R15 | The approve is checked where the ask happens, not where the action happens. | `diavlos check-approve <action>`: a one-line gate a deploy script calls before it deploys. (v0.1, later week.) |
-| R18 | A hijacked agent pastes `.env` into the room. | Outbound secret scan: refuse to send anything that looks like an API key or private key. Opt-in in v0.1, default-on in v0.2. |
+| R15 | The approve is checked where the ask happens, not where the action happens. | `diavlos check-approve <room> <action>`: a one-line gate a deploy script calls before it deploys. Exit 0 only for a valid, unexpired, unused human approve for exactly that action; it spends it. |
+| R18 | A hijacked agent pastes `.env` into the room. | Outbound secret scan, on by default: refuse to send anything that looks like an API key or private key. `secret_scan = false` turns it off. |
 | R19 | Two agents in a loop run up an API bill overnight. | Daily message budget per room and a per-sender rate limit, both on by default. Burst alert to the owner. |
 | R22 | `alice` and `aIice` both exist. | ASCII lowercase names only, and every name shows a short key fingerprint beside it in `who`. |
 
 ## Still open
 
-- Keys and inbox sit on disk in plain text in v0.1. OS keychain and encrypted
-  inbox come in v0.2.
 - The relay can't read messages but can see who talks to whom, when, and how
   much.
 - A stolen, unlocked laptop is you. Same as SSH keys. Rotate the room and
   re-invite.
+- Prompt injection: no crypto stops a message from talking an agent into a
+  bad action. Framing, the approve rule, and the SKILL.md reduce it; they do
+  not remove it.

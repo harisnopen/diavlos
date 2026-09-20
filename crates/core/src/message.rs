@@ -22,6 +22,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// reference: hash, size, where. Never inline.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
+/// An approve stops counting after this many seconds. Timeout means no.
+pub const APPROVE_TTL_SECS: i64 = 600;
+
 /// `prev` of the first message in a room.
 pub const GENESIS_PREV: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -243,6 +246,14 @@ pub struct Message {
     pub once: Option<bool>,
     #[serde(default)]
     pub sig: String,
+    /// Hash of the content as it was when signed. Only present when the
+    /// content is gone (a tombstone) or in an audit bundle, so the chain
+    /// and the signature can still be checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// True when the content was deleted and only the envelope remains.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tombstone: bool,
 }
 
 /// Everything you need to build a new message. `seq`, `prev`, `sig`, `id`
@@ -304,6 +315,8 @@ impl Message {
             expires: draft.expires,
             once: draft.once,
             sig: String::new(),
+            content_hash: None,
+            tombstone: false,
         };
         m.sig = signer.sign(&m.signing_bytes());
         m.check_size()?;
@@ -319,9 +332,20 @@ impl Message {
         }
     }
 
-    /// `sha256:<hex>` of the content.
+    /// `sha256:<hex>` of the content as signed. Uses the stored hash when
+    /// the content is gone.
     pub fn content_hash(&self) -> String {
-        self.content().hash()
+        match &self.content_hash {
+            Some(h) => h.clone(),
+            None => self.content().hash(),
+        }
+    }
+
+    /// A copy that carries its content hash explicitly, for bundles.
+    pub fn with_explicit_hash(&self) -> Message {
+        let mut m = self.clone();
+        m.content_hash = Some(self.content_hash());
+        m
     }
 
     /// The bytes the sender signs. Everything except `seq`, `prev` and
@@ -405,9 +429,11 @@ impl Message {
     }
 
     /// The message with content removed: a tombstone. The envelope, and so
-    /// the chain, is unchanged.
+    /// the chain and the signature, are unchanged.
     pub fn tombstone(&self) -> Message {
         let mut t = self.clone();
+        t.content_hash = Some(self.content_hash());
+        t.tombstone = true;
         t.text = String::new();
         t.action = None;
         t.data = Value::Null;
@@ -466,13 +492,19 @@ mod tests {
         let mut b = Message::new(draft("ops", "alice", "second"), &alice).unwrap();
         b.sequence(2, &a.chain_hash());
         assert_eq!(b.prev, a.chain_hash());
-        // Delete the content of `a`: the chain hash must not change.
+        // Delete the content of `a`: the chain hash and the signature must
+        // not change, because the tombstone keeps the content hash.
         let t = a.tombstone();
         assert_eq!(t.text, "");
-        assert_ne!(t.content_hash(), a.content_hash());
-        // The envelope stored with `a` carries the original content hash,
-        // so the chain check is done against the stored envelope.
-        assert_eq!(a.chain_hash(), b.prev);
+        assert!(t.tombstone);
+        assert_eq!(t.content_hash(), a.content_hash());
+        assert_eq!(t.chain_hash(), b.prev);
+        t.verify(&alice.public()).unwrap();
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("content_hash").is_some());
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("content_hash").is_none());
+        assert!(v.get("tombstone").is_none());
     }
 
     #[test]

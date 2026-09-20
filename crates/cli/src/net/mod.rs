@@ -57,10 +57,14 @@ pub enum Wire {
     Sequenced {
         message: Message,
     },
-    /// "Give me what I am missing after this seq."
+    /// "Give me what I am missing after this seq." Signed by the member's
+    /// key so the home knows who asks and can bind the node.
     Sync {
         room_id: String,
+        name: String,
         have_seq: u64,
+        ts: String,
+        sig: String,
     },
     Messages {
         room_id: String,
@@ -152,7 +156,23 @@ pub trait Transport: Send + Sync {
     async fn dial(&self, node: &str, hints: &Value) -> Result<Arc<dyn Link>>;
     /// The next link another helper opened to us. `None` once shut down.
     async fn accept(&self) -> Option<Arc<dyn Link>>;
+    /// What `doctor` and `status` show: relays, addresses, sockets.
+    fn network_info(&self) -> Value;
     async fn shutdown(&self);
+}
+
+/// The bytes a member signs on a `Sync`.
+pub fn sync_signing_bytes(
+    room_id: &str,
+    name: &str,
+    have_seq: u64,
+    ts: &str,
+    node: &str,
+) -> Vec<u8> {
+    diavlos_core::canonical::canonical_json(&serde_json::json!({
+        "sync": 1, "room_id": room_id, "name": name, "have_seq": have_seq, "ts": ts, "node": node,
+    }))
+    .into_bytes()
 }
 
 /// Write one length-prefixed JSON frame.
@@ -189,7 +209,10 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(1024);
         let w = Wire::Sync {
             room_id: "r".into(),
+            name: "bob".into(),
             have_seq: 7,
+            ts: "t".into(),
+            sig: "s".into(),
         };
         write_frame(&mut a, &w).await.unwrap();
         let back = read_frame(&mut b).await.unwrap();
