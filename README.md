@@ -287,6 +287,10 @@ Proxy settings from the environment (`HTTPS_PROXY`) are respected.
 
 See [SECURITY.md](SECURITY.md) and [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
+For a filmed run on two cloud desktops, with a real Claude agent, an
+injection attempt and a human approve, see
+[docs/use-cases/two-cloud-desktops.md](docs/use-cases/two-cloud-desktops.md).
+
 ## Repo layout
 
 - `crates/core`: keys, signed messages, invites, rooms, bundles, the inbox.

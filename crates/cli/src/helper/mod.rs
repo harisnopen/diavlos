@@ -57,6 +57,8 @@ pub struct Helper {
     alerted: Mutex<HashSet<String>>,
     shutdown: watch::Sender<bool>,
     policy_hook: DefaultHook,
+    /// Rooms that already have a link task running (member side).
+    room_tasks: Mutex<HashSet<String>>,
     /// Everything the helper does, as a stream and a short log.
     events: broadcast::Sender<Event>,
     event_log: std::sync::Mutex<VecDeque<Event>>,
@@ -569,16 +571,18 @@ impl Helper {
     }
 
     /// Home side: remember a member helper's link so we can push to it.
-    /// Refuses a second live link claiming the same node.
+    /// One helper may hold many keys, so a second link from the same node
+    /// simply replaces the first; the one-key-two-machines check lives in
+    /// `node_check`.
     async fn register_link(&self, room_id: &str, link: Arc<dyn Link>) -> Result<()> {
         let node = link.remote_node();
         let mut links = self.links.lock().await;
         let per_room = links.entry(room_id.to_string()).or_default();
         if let Some(old) = per_room.get(&node) {
-            if !old.is_closed() && !Arc::ptr_eq(old, &link) {
-                return Err(Error::Denied(
-                    "this node is already online in the room from another connection".into(),
-                ));
+            if !Arc::ptr_eq(old, &link) && !old.is_closed() {
+                // Keep the newer connection; the old one will notice on
+                // its next request and reconnect if it is still alive.
+                old.close();
             }
         }
         per_room.insert(node, link);
@@ -586,6 +590,13 @@ impl Helper {
     }
 
     // ---- member side ---------------------------------------------------
+
+    /// Start the link task for a room joined from elsewhere, once.
+    pub async fn ensure_room_task(self: &Arc<Self>, room_id: &str) {
+        if self.room_tasks.lock().await.insert(room_id.to_string()) {
+            tokio::spawn(peers::room_link_task(self.clone(), room_id.to_string()));
+        }
+    }
 
     /// Wake the room task so it flushes the outbox now.
     async fn wake_room(&self, room_id: &str) {
@@ -753,6 +764,7 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         alerted: Mutex::new(HashSet::new()),
         shutdown,
         policy_hook: DefaultHook,
+        room_tasks: Mutex::new(HashSet::new()),
         events,
         event_log: std::sync::Mutex::new(VecDeque::new()),
         metrics_addr,
@@ -768,8 +780,8 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
     tokio::spawn(peers::accept_loop(helper.clone()));
     // A task per room we joined from elsewhere.
     for room in helper.store.list_rooms()? {
-        if !helper.is_home(&room) {
-            tokio::spawn(peers::room_link_task(helper.clone(), room.id.clone()));
+        if !helper.is_home(&room) && !room.closed {
+            helper.ensure_room_task(&room.id).await;
         }
     }
     // Commands over the local socket.

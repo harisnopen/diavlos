@@ -543,10 +543,7 @@ async fn join(helper: &Arc<Helper>, token: &str, identity: &str) -> Result<JoinR
         Some(&room.id),
         serde_json::json!({"name": my_name, "room": room.name}),
     );
-    tokio::spawn(super::peers::room_link_task(
-        helper.clone(),
-        room.id.clone(),
-    ));
+    helper.ensure_room_task(&room.id).await;
     Ok(JoinResult {
         name: my_name,
         members: helper.store.members(&room.id)?,
