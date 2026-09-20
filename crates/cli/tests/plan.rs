@@ -55,12 +55,22 @@ impl Home {
         let out = self.run(args);
         assert!(
             out.status.success(),
-            "diavlos {args:?} failed with {:?}\nstdout: {}\nstderr: {}",
+            "diavlos {args:?} failed with {:?}\nstdout: {}\nstderr: {}\nhelper.log:\n{}",
             out.status.code(),
             String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&out.stderr),
+            self.helper_log()
         );
         String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// The tail of this home's helper log, for failure messages. The log
+    /// lives in a temp dir that is removed on drop, so read it now.
+    fn helper_log(&self) -> String {
+        let text = std::fs::read_to_string(self.dir.join("helper.log")).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(40);
+        lines[start..].join("\n")
     }
 
     fn code(&self, args: &[&str]) -> i32 {
@@ -72,9 +82,10 @@ impl Home {
         assert_eq!(
             out.status.code(),
             Some(code),
-            "diavlos {args:?}\nstdout: {}\nstderr: {}",
+            "diavlos {args:?}\nstdout: {}\nstderr: {}\nhelper.log:\n{}",
             String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&out.stderr),
+            self.helper_log()
         );
         String::from_utf8_lossy(&out.stderr).to_string()
     }

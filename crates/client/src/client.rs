@@ -130,7 +130,29 @@ impl Client {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::io::AsRawHandle;
             use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::Foundation::{
+                SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+            };
+            // Windows children inherit every inheritable handle, not just
+            // the stdio we hand them. If whoever ran us is reading our
+            // output through a pipe, the long-lived helper would keep that
+            // pipe open and the reader would wait until the helper exits.
+            // So make our own stdio non-inheritable before spawning.
+            for h in [
+                std::io::stdin().as_raw_handle(),
+                std::io::stdout().as_raw_handle(),
+                std::io::stderr().as_raw_handle(),
+            ] {
+                if !h.is_null() {
+                    // SAFETY: a plain Win32 call on a handle this process owns;
+                    // failure (an invalid handle) is harmless and ignored.
+                    unsafe {
+                        SetHandleInformation(h as HANDLE, HANDLE_FLAG_INHERIT, 0);
+                    }
+                }
+            }
             const DETACHED_PROCESS: u32 = 0x0000_0008;
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
