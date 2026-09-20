@@ -3,14 +3,14 @@ resolver = "2"
 members = ["crates/core", "crates/client", "crates/cli", "crates/enterprise"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/harisnopen/diavlos"
 rust-version = "1.95"
 
 [workspace.dependencies]
-diavlos-core = { path = "crates/core", version = "0.1.0" }
+diavlos-core = { path = "crates/core", version = "1.0.0" }
 
 anyhow = "1"
 thiserror = "2"
@@ -47,7 +47,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 fs4 = "1"
 windows-service = "0.8"
-diavlos-client = { path = "crates/client", version = "0.1.0" }
+diavlos-client = { path = "crates/client", version = "1.0.0" }
 
 [profile.release]
 lto = "thin"
