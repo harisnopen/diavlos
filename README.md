@@ -36,7 +36,7 @@ Delivery promise, in writing: **at-least-once, dedup by id, on disk before
 ```sh
 curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
 # or: npm install -g diavlos
-# or: brew install --formula packaging/homebrew/diavlos.rb   (from a checkout)
+# or: brew tap harisnopen/tap && brew install --HEAD diavlos   (drop --HEAD once released)
 # or: cargo install --git https://github.com/harisnopen/diavlos diavlos
 ```
 

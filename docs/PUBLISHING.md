@@ -73,23 +73,25 @@ step.
 ## 3. Homebrew tap
 
 Homebrew only takes third-party formulas from a repo named
-`homebrew-<something>`. So:
+`homebrew-<something>`. The tap is live at
+https://github.com/harisnopen/homebrew-tap, and a user installs with:
 
-- Repo: `harisnopen/homebrew-tap`
-- A user then runs `brew tap harisnopen/tap && brew install diavlos`
+```bash
+brew tap harisnopen/tap
+brew install diavlos          # once a release exists
+brew install --HEAD diavlos   # works today, builds from main
+```
 
 The formula is not written by hand. **The release workflow generates it**
 with the real checksums of the binaries it just built and signed, and
-attaches it to the release as `diavlos.rb`. Publishing a new version to the
-tap is therefore a copy:
+attaches it to the release as `diavlos.rb`. The tap then picks it up by
+itself: `.github/workflows/sync.yml` runs hourly, downloads
+`releases/latest/download/diavlos.rb`, checks it parses as Ruby and defines
+`class Diavlos < Formula`, and commits it only if it differs from what is
+there. Nothing to do by hand on a release.
 
-```bash
-TAG=v1.0.0
-curl -fsSLO "https://github.com/harisnopen/diavlos/releases/download/$TAG/diavlos.rb"
-# in a clone of harisnopen/homebrew-tap
-mkdir -p Formula && mv diavlos.rb Formula/diavlos.rb
-git commit -am "diavlos $TAG" && git push
-```
+To pull a version in right now instead of waiting for the hour, run the
+**sync formula** workflow from the tap's Actions tab.
 
 `packaging/homebrew/diavlos.rb` in this repo is a different thing: a
 build-from-source formula for installing a tag with no release. The tap does
@@ -160,7 +162,6 @@ Pages from `.github/workflows/site.yml`.
 |---|---|
 | crates.io token | Only an account owner can mint one. |
 | npm login | Same. |
-| Creating `homebrew-tap` | A new public repo under the account. |
 | Making the release tag | Tag deletion and creation are account actions. |
 
 Everything else in this file is scripted or generated.
@@ -177,7 +178,7 @@ Everything else in this file is scripted or generated.
    publishes the release.
 5. `cargo publish` the three crates, in order.
 6. `npm publish` the shim.
-7. Copy `diavlos.rb` from the release into the tap.
+7. The tap syncs its formula within the hour, by itself.
 8. Check the three ways in actually work:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
