@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+homepage = "https://diavlos.sh"
+documentation = "https://diavlos.sh"
+readme = "README.md"
+keywords = ["agents", "mcp", "cli", "messaging", "ai"]
+categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "diavlos"

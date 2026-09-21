@@ -14,6 +14,7 @@ Error codes everywhere: 2 not in room, 3 reached nobody, 4 timed out, 5 name alr
 - [Threat model](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md): the wire, the door, and the agent's head.
 - [Relays](https://github.com/harisnopen/diavlos/blob/main/docs/RELAY.md): public relays by default; how to self-host.
 - [CI](https://github.com/harisnopen/diavlos/blob/main/docs/CI.md): the GitHub Action. Send from a workflow, or ask a human and wait.
+- [Publishing](https://github.com/harisnopen/diavlos/blob/main/docs/PUBLISHING.md): crates.io, npm and the Homebrew tap.
 - [The promise](https://github.com/harisnopen/diavlos/blob/main/LICENSE-PROMISE.md): what stays MIT, what we charge for, and why a licence never stops a message.
 - [Security policy](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md): how to report a problem.
 
