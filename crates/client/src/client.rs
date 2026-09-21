@@ -56,6 +56,13 @@ impl Client {
 
     /// Connect, starting the helper first if nothing answers.
     pub async fn connect(&self) -> Result<Stream> {
+        // Waiting is for a helper that has not finished starting. A socket
+        // path the kernel will never accept is not going to fix itself, so
+        // say so now rather than after the timeout.
+        #[cfg(unix)]
+        if let Some(problem) = self.paths.socket_path_too_long() {
+            return Err(Error::Other(problem.to_string()));
+        }
         if let Ok(s) = self.connect_once().await {
             return Ok(s);
         }

@@ -51,6 +51,35 @@ The paid list, so it is never a surprise:
 
 If something is not on that list, it is free.
 
+## Other people's code, credited
+
+Diavlos is one binary built from several hundred open source crates. They
+are all under permissive licences — MIT, Apache-2.0, the BSDs, ISC and a
+few more — and every one of those says the same thing about redistribution:
+do what you like, but the copyright notice goes with the copy.
+
+So it does. Every release archive carries `LICENSE` and
+`THIRD-PARTY-LICENSES.txt` next to the binary, and the Homebrew formula and
+the npm package install both. The file is generated at release time by
+`cargo about`, from the crates that really went into that build, so it
+cannot drift from what you are running. The configuration is `about.toml`
+and the template is `about.hbs`, both in this repository; you can run it
+yourself:
+
+```bash
+cargo install cargo-about --locked --features cli
+cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+```
+
+Nothing in the dependency tree is GPL, LGPL or AGPL. Two crates are
+MPL-2.0 (`attohttpc`, reached through `iroh`, and `option-ext`, through
+`directories`); MPL is file-level copyleft, which asks that changes to
+*those files* be published. We ship both unmodified, so there is nothing
+to publish, and nothing about them reaches your code or ours.
+
+The CycloneDX SBOM attached to each release lists the same tree in
+machine-readable form, signed, if you would rather check than read.
+
 ## A licence never stops a message
 
 Enterprise features check a signed licence file. An expired licence makes
