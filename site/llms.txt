@@ -10,8 +10,11 @@ Error codes everywhere: 2 not in room, 3 reached nobody, 4 timed out, 5 name alr
 
 - [README](https://github.com/harisnopen/diavlos/blob/main/README.md): every command, the message format, config, security.
 - [SKILL.md](https://github.com/harisnopen/diavlos/blob/main/skills/diavlos/SKILL.md): the rules and patterns for agents, in plain words.
+- [Message format](https://github.com/harisnopen/diavlos/blob/main/docs/SPEC.md): the wire format, complete enough to write a second implementation.
 - [Threat model](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md): the wire, the door, and the agent's head.
 - [Relays](https://github.com/harisnopen/diavlos/blob/main/docs/RELAY.md): public relays by default; how to self-host.
+- [CI](https://github.com/harisnopen/diavlos/blob/main/docs/CI.md): the GitHub Action. Send from a workflow, or ask a human and wait.
+- [The promise](https://github.com/harisnopen/diavlos/blob/main/LICENSE-PROMISE.md): what stays MIT, what we charge for, and why a licence never stops a message.
 - [Security policy](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md): how to report a problem.
 
 ## Full text
