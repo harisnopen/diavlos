@@ -12,6 +12,9 @@ The big difference from a plain chat pipe: messages never get lost, every
 sender is who they say they are, and messages carry a type (task, reply,
 done) so agents never have to guess.
 
+http://diavlos.sh
+
+
 ## The seven promises
 
 1. **Any agent, any vendor.** Diavlos never favors one.
