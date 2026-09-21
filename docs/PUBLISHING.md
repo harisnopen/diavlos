@@ -54,17 +54,47 @@ right before the first push.
 
 ## 2. npm
 
-**Name:** `diavlos`. Free as of 2026-09-21.
+**Name:** `diavlos`. Claimed 2026-09-21, published from the account
+`charisn`.
 
 The package is a shim: it downloads the right signed binary for the
 platform on install. It ships three small files and no binary of its own.
 
-```bash
-cd packaging/npm
-npm pack --dry-run          # see exactly what goes up
-npm login
-npm publish --access public
-```
+**Nobody publishes this by hand any more.** `.github/workflows/npm.yml`
+runs when a GitHub release is published and publishes through npm's
+*trusted publishing*: GitHub hands npm a short-lived OIDC token proving
+that this workflow, in this repository, is doing the publishing. There is
+no `NODE_AUTH_TOKEN`, no stored secret, and nothing that can leak. npm
+attaches a provenance attestation on the way through.
+
+It runs on `release: published` rather than on the tag, because the shim
+downloads the binary from that release. Before publishing it checks three
+things and refuses on any of them:
+
+- the tag starts with `v`, and `packaging/npm/package.json` carries exactly
+  that version — a shim that says 1.0.1 downloads the 1.0.1 release, so a
+  mismatch would ship something that cannot install;
+- all five archives are really on the release;
+- the version is not already on npm (so a re-run is a no-op, not a failure).
+
+`workflow_dispatch` takes a tag if it ever needs running by hand.
+
+**The one-time setup**, on npm, at
+https://www.npmjs.com/package/diavlos/access → Trusted Publisher:
+
+| Field | Value |
+|---|---|
+| Publisher | GitHub Actions |
+| Organization or user | `harisnopen` |
+| Repository | `diavlos` |
+| Workflow filename | `npm.yml` |
+| Environment | *(blank)* |
+
+If the workflow is ever renamed, that field has to change with it or the
+publish stops working.
+
+Trusted publishing needs npm CLI 11.5.1 or newer and Node 22.14 or newer;
+the workflow installs `npm@latest` to be sure.
 
 The shim downloads from the GitHub release for its own version, so **the
 release must exist first** or `npm install diavlos` fails at the postinstall
@@ -161,7 +191,7 @@ Pages from `.github/workflows/site.yml`.
 | Step | Why |
 |---|---|
 | crates.io token | Only an account owner can mint one. |
-| npm login | Same. |
+| Naming the trusted publisher on npm | Only a package owner can set it, and only in the browser. Once. |
 | Making the release tag | Tag deletion and creation are account actions. |
 
 Everything else in this file is scripted or generated.
@@ -177,7 +207,7 @@ Everything else in this file is scripted or generated.
    signs each with sigstore, writes the SBOM, generates `diavlos.rb`, and
    publishes the release.
 5. `cargo publish` the three crates, in order.
-6. `npm publish` the shim.
+6. The npm workflow publishes the shim by itself, once the release is out.
 7. The tap syncs its formula within the hour, by itself.
 8. Check the three ways in actually work:
    ```bash

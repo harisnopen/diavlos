@@ -1,0 +1,114 @@
+# Publish the npm shim, with no token anywhere.
+#
+# npm trusted publishing: GitHub hands npm a short-lived OIDC token proving
+# this exact workflow, in this exact repo, is doing the publishing. npm is
+# told once, in the package settings, that it should believe us. Nothing is
+# stored here and nothing can leak. See docs/PUBLISHING.md.
+#
+# It runs after the release is published, never before: the shim downloads
+# the binary from that release, so publishing earlier would ship a version
+# that cannot install.
+name: npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # the OIDC token. Without this there is no way in.
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Work out the tag
+        id: tag
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v*) ;;
+            *) echo "tag '$TAG' does not start with v"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: npm 11.5.1 or newer, which is what OIDC needs
+        run: |
+          set -euo pipefail
+          npm install -g npm@latest
+          npm --version
+
+      - name: The package version must match the tag
+        # A shim that says 1.0.1 downloads the 1.0.1 release. Publishing it
+        # against the 1.0.0 tag would ship something that cannot install.
+        env:
+          WANT: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          got=$(node -p "require('./packaging/npm/package.json').version")
+          if [ "$got" != "$WANT" ]; then
+            echo "packaging/npm/package.json says $got, tag says $WANT"
+            echo "bump the package version before tagging"
+            exit 1
+          fi
+          echo "version $got matches the tag"
+
+      - name: The release must already carry the binaries
+        # postinstall downloads these. If they are missing, every
+        # `npm install diavlos` fails at install time.
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          for f in \
+            diavlos-x86_64-unknown-linux-gnu.tar.gz \
+            diavlos-aarch64-unknown-linux-gnu.tar.gz \
+            diavlos-x86_64-apple-darwin.tar.gz \
+            diavlos-aarch64-apple-darwin.tar.gz \
+            diavlos-x86_64-pc-windows-msvc.zip
+          do
+            if ! curl -fsSLI -o /dev/null "$base/$f"; then
+              echo "missing from the release: $f"
+              exit 1
+            fi
+            echo "ok $f"
+          done
+
+      - name: Skip if this version is already on npm
+        id: check
+        env:
+          WANT: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "diavlos@$WANT" version >/dev/null 2>&1; then
+            echo "diavlos@$WANT is already published; nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        # No NODE_AUTH_TOKEN. npm sees the OIDC environment and uses it, and
+        # attaches a provenance attestation on the way through.
+        if: steps.check.outputs.skip == 'false'
+        working-directory: packaging/npm
+        run: npm publish --access public
