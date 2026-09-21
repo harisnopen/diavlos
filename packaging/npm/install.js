@@ -39,6 +39,13 @@ get(url, res => {
     }
     fs.copyFileSync(path.join(tmp, path.basename(dest)), dest);
     if (process.platform !== 'win32') fs.chmodSync(dest, 0o755);
+    // The archive carries the licence notices next to the binary, and they
+    // have to stay with it: this package is another copy. Releases before
+    // 1.0.1 have no such files, so a missing one is not an error.
+    for (const f of ['LICENSE', 'THIRD-PARTY-LICENSES.txt']) {
+      const from = path.join(tmp, f);
+      if (fs.existsSync(from)) fs.copyFileSync(from, path.join(__dirname, f));
+    }
     fs.rmSync(tmp, { recursive: true, force: true });
     console.log(`diavlos: installed ${dest}`);
     void zlib;

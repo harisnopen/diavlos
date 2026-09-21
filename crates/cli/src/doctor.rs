@@ -39,6 +39,21 @@ pub async fn run(paths: &Paths) -> Value {
                 format!("{mode:o} (want 700)"),
             );
         }
+        // Worth saying before anything tries to start: nothing works at all
+        // if the socket cannot be bound, and the error from down there is
+        // unreadable.
+        match paths.socket_path_too_long() {
+            Some(problem) => check("socket path", false, problem.to_string()),
+            None => {
+                use std::os::unix::ffi::OsStrExt;
+                let len = paths.socket_file().as_os_str().as_bytes().len();
+                check(
+                    "socket path",
+                    true,
+                    format!("{len} bytes, within the limit"),
+                );
+            }
+        }
     }
     match Config::load(&paths.config()) {
         Ok(c) => check(

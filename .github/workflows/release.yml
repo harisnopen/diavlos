@@ -13,8 +13,39 @@ permissions:
   id-token: write
 
 jobs:
+  licenses:
+    # MIT, Apache-2.0 and the BSDs all allow shipping a binary built from
+    # their code, on the one condition that the copyright notice goes with
+    # it. A bare binary in a tar.gz carries nobody's notice, so write the
+    # notices out once and put the file in every archive below.
+    name: third-party licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-about
+        # The binary is behind the `cli` feature; without it the install
+        # succeeds and produces nothing.
+        run: cargo install cargo-about --locked --features cli
+      - name: Generate
+        run: |
+          set -euo pipefail
+          cargo about generate about.hbs -o THIRD-PARTY-LICENSES.txt
+          # An empty or tiny file would mean the template silently produced
+          # nothing, which is worse than failing here.
+          bytes=$(wc -c < THIRD-PARTY-LICENSES.txt)
+          echo "wrote $bytes bytes"
+          [ "$bytes" -gt 50000 ] || { echo "suspiciously small; refusing"; exit 1; }
+          grep -q "^End of third-party licences." THIRD-PARTY-LICENSES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: licences
+          path: THIRD-PARTY-LICENSES.txt
+
   build:
     name: build (${{ matrix.target }})
+    needs: [licenses]
     strategy:
       fail-fast: false
       matrix:
@@ -32,16 +63,26 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p diavlos --target ${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: licences
       - name: Package
         shell: bash
+        # LICENSE and THIRD-PARTY-LICENSES.txt travel inside the archive,
+        # not merely beside it on the release page: the notice has to stay
+        # with the copy, and a copy is what someone downloads.
         run: |
+          set -euo pipefail
           mkdir -p dist
+          cp LICENSE THIRD-PARTY-LICENSES.txt dist/
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             cp target/${{ matrix.target }}/release/diavlos.exe dist/
-            (cd dist && 7z a diavlos-${{ matrix.target }}.zip diavlos.exe && rm diavlos.exe)
+            (cd dist && 7z a diavlos-${{ matrix.target }}.zip diavlos.exe LICENSE THIRD-PARTY-LICENSES.txt)
+            (cd dist && rm diavlos.exe LICENSE THIRD-PARTY-LICENSES.txt)
           else
             cp target/${{ matrix.target }}/release/diavlos dist/
-            (cd dist && tar -czf diavlos-${{ matrix.target }}.tar.gz diavlos && rm diavlos)
+            (cd dist && tar -czf diavlos-${{ matrix.target }}.tar.gz diavlos LICENSE THIRD-PARTY-LICENSES.txt)
+            (cd dist && rm diavlos LICENSE THIRD-PARTY-LICENSES.txt)
           fi
       - uses: sigstore/cosign-installer@v3
       - name: Sign
@@ -75,7 +116,7 @@ jobs:
           path: dist/*
 
   release:
-    needs: [build, sbom]
+    needs: [build, sbom, licenses]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -128,6 +169,7 @@ jobs:
 
             def install
               bin.install "diavlos"
+              prefix.install "LICENSE", "THIRD-PARTY-LICENSES.txt"
             end
 
             service do
@@ -155,5 +197,7 @@ jobs:
                   --certificate-oidc-issuer https://token.actions.githubusercontent.com <file>
 
             The SBOM (CycloneDX) is `diavlos-${{ github.ref_name }}.cdx.json`.
+
+            Every archive carries `LICENSE` and `THIRD-PARTY-LICENSES.txt` next to the binary: Diavlos is MIT, and the crates it is built from are named there with their own notices.
 
             `diavlos.rb` is the Homebrew formula for this release, with the checksums of the binaries above. The tap at `harisnopen/homebrew-tap` picks it up by itself, within the hour.

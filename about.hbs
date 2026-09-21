@@ -1,0 +1,32 @@
+Third-party licences
+====================
+
+Diavlos is MIT. See LICENSE for its own terms, and LICENSE-PROMISE.md for
+what stays open and what does not.
+
+The binary you have is built from the crates listed below. Every one of
+them is under a permissive licence that allows exactly that, on the
+condition that its copyright notice travels with the copy. That is what
+this file is.
+
+It is generated at release time by `cargo about`, from the crates that
+really went into the build, so it cannot drift from what you are running.
+
+Nothing in this file restricts what you may do with Diavlos.
+
+{{#each licenses}}
+==========================================================================
+{{{name}}}
+==========================================================================
+
+Covers these crates in this build:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}}
+      {{{crate.repository}}}{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
+==========================================================================
+End of third-party licences.
