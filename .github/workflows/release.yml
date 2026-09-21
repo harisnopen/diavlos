@@ -156,4 +156,4 @@ jobs:
 
             The SBOM (CycloneDX) is `diavlos-${{ github.ref_name }}.cdx.json`.
 
-            `diavlos.rb` is the Homebrew formula for this release, with the checksums of the binaries above. Copy it into the tap.
+            `diavlos.rb` is the Homebrew formula for this release, with the checksums of the binaries above. The tap at `harisnopen/homebrew-tap` picks it up by itself, within the hour.
