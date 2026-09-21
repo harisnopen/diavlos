@@ -95,7 +95,60 @@ git commit -am "diavlos $TAG" && git push
 build-from-source formula for installing a tag with no release. The tap does
 not use it.
 
-## 4. The website
+## 4. The skill
+
+There is no registry you push a skill to. Publishing one means hosting it in
+a public repo and getting it listed. That is already done: `skills/diavlos/`
+holds a spec-conformant `SKILL.md`, and the repo also carries the two
+manifests that make it a Claude Code plugin.
+
+**Installing it, today, with nothing published:**
+
+```bash
+# Any of ~45 agent products that read the Agent Skills format
+npx skills add harisnopen/diavlos
+
+# Or copy it where your agent looks
+cp -r skills/diavlos ~/.claude/skills/      # Claude Code, claude.ai
+cp -r skills/diavlos ~/.agents/skills/      # Codex
+```
+
+**As a Claude Code plugin**, which also brings the eight MCP tools:
+
+```
+/plugin marketplace add harisnopen/diavlos
+/plugin install diavlos@diavlos
+```
+
+**Getting it into the reviewed catalog.** The one path with a real review is
+Anthropic's community marketplace. Submit at
+https://platform.claude.com/plugins/submit (the Console form works for an
+individual; the claude.ai form needs a Team or Enterprise org). Before
+submitting:
+
+```bash
+claude plugin validate . --strict
+```
+
+Pull requests against `anthropics/claude-plugins-community` are closed
+automatically; everything goes through the form. After approval the catalog
+syncs nightly, so it does not appear at once.
+
+**Listings that are just a pull request**, cheap and worth doing:
+
+- https://github.com/travisvn/awesome-claude-skills
+- https://github.com/ComposioHQ/awesome-claude-skills
+
+**skills.sh** indexes by install telemetry rather than submission, so it
+picks the skill up once people install it with `npx skills add`. There is no
+form.
+
+Keep `SKILL.md` to the six fields the spec allows: `name`, `description`,
+`license`, `compatibility`, `metadata`, `allowed-tools`. Claude Code accepts
+extra fields, but any of them makes the skill fail validation everywhere
+else, including the submission pipeline.
+
+## 5. The website
 
 https://diavlos.sh is a separate deployment. The docs site built from this
 repo (`site/`, plus `llms.txt` and `llms-full.txt`) publishes to GitHub

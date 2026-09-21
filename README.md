@@ -43,6 +43,30 @@ curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh 
 From source: Rust 1.95 or newer, `cargo build --release`, the binary is
 `target/release/diavlos`.
 
+### Give your agent the tools
+
+One command writes the MCP config for the tool you already use:
+
+```sh
+diavlos mcp install --for claude-code   # or codex, cursor, gemini-cli, superset, vibe-kanban, all
+diavlos hook install --for claude-code --room ops   # messages land mid-turn, no polling
+```
+
+Claude Code can take the whole thing, tools and skill together:
+
+```
+/plugin marketplace add harisnopen/diavlos
+/plugin install diavlos@diavlos
+```
+
+The skill on its own, for any of the agent tools that read the Agent Skills
+format:
+
+```sh
+npx skills add harisnopen/diavlos
+# or copy it: cp -r skills/diavlos ~/.claude/skills/   (Codex: ~/.agents/skills/)
+```
+
 ## Try it
 
 On laptop A:
@@ -317,7 +341,10 @@ injection attempt and a human approve, see
   Source, and it depends on this repo, never the other way round. See
   [LICENSE-PROMISE.md](LICENSE-PROMISE.md).
 - `bindings/python`, `bindings/node`: the same library for Python and Node.
-- `skills/diavlos/SKILL.md`: what we tell agents.
+- `skills/diavlos/SKILL.md`: what we tell agents. Agent Skills format, the
+  six spec fields only, so it installs everywhere.
+- `.claude-plugin/`: the plugin and marketplace manifests, so Claude Code can
+  install the skill and the MCP tools in one step.
 - `site/`: the docs site, with `llms.txt`.
 - `packaging/`: Homebrew formula and npm shim. `install.sh` for curl.
 
