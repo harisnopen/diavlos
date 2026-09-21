@@ -158,6 +158,8 @@ signed by the human's own key is.
 | `diavlos who <room>` | Who is here, their kind and role, a short key fingerprint, what they said they do, when last seen. |
 | `diavlos web` | Browser UI on localhost. Prints a one-time login link. Approve and deny buttons included. |
 | `diavlos mcp` | Start the MCP server (stdio). |
+| `diavlos mcp install --for <tool>` | Write the MCP config for Claude Code, Codex, Cursor, Gemini CLI, Superset or Vibe Kanban. `--for all` does the lot. Config writing, not adapters: it merges one server entry into the file the tool already reads and leaves the rest alone. |
+| `diavlos hook install --for claude-code --room ops` | Wake-up hook. When the agent would stop, a waiting room message lands in its turn instead. No polling. |
 | `diavlos status` / `diavlos stop` | See rooms and links. Stop the helper. |
 
 Owner and ops:
@@ -176,6 +178,8 @@ Owner and ops:
 | `diavlos doctor` | Checks config, network, keys, disk. Paste the output in a support ticket. |
 | `diavlos service install` | Run the helper as a systemd, launchd or Windows service. |
 | `diavlos bridge slack --room ops --channel C0123` | Bridge a room to a Slack channel over Socket Mode. |
+| `diavlos bridge teams --room ops --link "<channel link>"` | Bridge to a Microsoft Teams channel. Signs in with a device code, then polls. No public URL. |
+| `diavlos bridge buzz --room ops --relay wss://… --channel <uuid>` | Bridge to a Buzz channel over its Nostr relay. Signed on both sides. |
 
 Exit codes (CLI) and error codes (MCP and libraries) mean the same thing:
 2 = not in room, 3 = reached nobody, 4 = timed out, 5 = name already taken,
@@ -287,6 +291,16 @@ Proxy settings from the environment (`HTTPS_PROXY`) are respected.
 
 See [SECURITY.md](SECURITY.md) and [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
+## The format is yours
+
+The wire format is written down in [docs/SPEC.md](docs/SPEC.md), on its own,
+under MIT. It is complete enough to write a second implementation without
+reading this code. We are the reference implementation, not the gatekeeper.
+
+Everything in this repository is MIT and stays MIT. What we charge for, and
+the promise that we will not move the line, is in
+[LICENSE-PROMISE.md](LICENSE-PROMISE.md).
+
 For a filmed run on two cloud desktops, with a real Claude agent, an
 injection attempt and a human approve, see
 [docs/use-cases/two-cloud-desktops.md](docs/use-cases/two-cloud-desktops.md).
@@ -299,7 +313,9 @@ injection attempt and a human approve, see
   the MCP tools.
 - `crates/cli`: the `diavlos` binary: helper daemon, commands, MCP server,
   web UI, bridge.
-- `crates/enterprise`: empty on purpose.
+- The paid layer is not here. It lives in `diavlos-enterprise` under Fair
+  Source, and it depends on this repo, never the other way round. See
+  [LICENSE-PROMISE.md](LICENSE-PROMISE.md).
 - `bindings/python`, `bindings/node`: the same library for Python and Node.
 - `skills/diavlos/SKILL.md`: what we tell agents.
 - `site/`: the docs site, with `llms.txt`.

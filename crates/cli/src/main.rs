@@ -4,6 +4,8 @@ mod bridge;
 mod config;
 mod doctor;
 mod helper;
+mod hook;
+mod install;
 mod mcp;
 mod net;
 mod service;
@@ -252,9 +254,17 @@ enum Cmd {
     },
     /// Stop the helper.
     Stop,
-    /// Start the MCP server (stdio). Add this one line to Claude Code or
-    /// Cursor config.
-    Mcp,
+    /// Wake-up hooks: install one, or run it.
+    Hook {
+        #[command(subcommand)]
+        which: HookCmd,
+    },
+    /// Start the MCP server (stdio), or write an agent tool's MCP config
+    /// so it has the room tools.
+    Mcp {
+        #[command(subcommand)]
+        which: Option<McpCmd>,
+    },
     /// Browser UI on localhost. Prints a one-time login link.
     Web {
         #[arg(long, default_value_t = 7777)]
@@ -275,6 +285,58 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum HookCmd {
+    /// Write the wake-up hook for an agent tool, so room messages land in
+    /// its turn instead of it polling.
+    Install {
+        /// Which tool. Run `diavlos hook install --list` to see them.
+        #[arg(long = "for", value_name = "TOOL")]
+        target: Option<String>,
+        /// Which room to watch.
+        #[arg(long)]
+        room: Option<String>,
+        /// Write the project-scoped file instead of the user-wide one.
+        #[arg(long)]
+        project: bool,
+        /// Print what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// List the tools and what each one can do.
+        #[arg(long)]
+        list: bool,
+    },
+    /// What the hook itself runs. Reads the hook payload on stdin and
+    /// answers on stdout. You do not call this by hand.
+    Run {
+        #[arg(long)]
+        room: String,
+        /// Answer in the shape a session-start hook wants.
+        #[arg(long)]
+        session_start: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Write the MCP config for an agent tool. Config writing, not an
+    /// adapter: the tool already speaks MCP, we just add one server entry.
+    Install {
+        /// Which tool, or `all`. Run `diavlos mcp install --list` to see them.
+        #[arg(long = "for", value_name = "TOOL")]
+        target: Option<String>,
+        /// Write the project-scoped file instead of the user-wide one.
+        #[arg(long)]
+        project: bool,
+        /// Print what would change and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// List the tools and where each one's config lives.
+        #[arg(long)]
+        list: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServiceCmd {
     Install,
     Uninstall,
@@ -289,6 +351,38 @@ enum BridgeCmd {
         /// Slack channel id, like C0123456789.
         #[arg(long)]
         channel: String,
+    },
+    /// Microsoft Teams, over Graph. Signs in with a device code, then
+    /// polls. Needs TEAMS_CLIENT_ID and TEAMS_TENANT_ID.
+    Teams {
+        #[arg(long)]
+        room: Option<String>,
+        /// Paste "Get link to channel" from Teams instead of the two ids.
+        #[arg(long)]
+        link: Option<String>,
+        /// The team id (a guid).
+        #[arg(long)]
+        team: Option<String>,
+        /// The channel id, like 19:...@thread.tacv2.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Print the teams and channels this sign-in can see, then stop.
+        #[arg(long)]
+        list_channels: bool,
+    },
+    /// Buzz (Block), over its Nostr relay. Needs BUZZ_SECRET_KEY.
+    Buzz {
+        #[arg(long)]
+        room: Option<String>,
+        /// The relay, like wss://buzz.example.com.
+        #[arg(long)]
+        relay: String,
+        /// The Buzz channel id (a uuid). Use --list-channels to find it.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Print the channels this key can see, then stop.
+        #[arg(long)]
+        list_channels: bool,
     },
 }
 
@@ -341,7 +435,28 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             let _ = service;
             helper::run(paths).await.map(|_| 0).map_err(other)
         }
-        Cmd::Mcp => mcp::serve(paths, identity).await.map(|_| 0).map_err(other),
+        Cmd::Hook { which } => match which {
+            HookCmd::Install {
+                target,
+                room,
+                project,
+                dry_run,
+                list,
+            } => hook_install(&identity, target, room, project, dry_run, list).map_err(other),
+            HookCmd::Run {
+                room,
+                session_start,
+            } => hook_run(&client, &identity, &room, session_start).await,
+        },
+        Cmd::Mcp { which } => match which {
+            None => mcp::serve(paths, identity).await.map(|_| 0).map_err(other),
+            Some(McpCmd::Install {
+                target,
+                project,
+                dry_run,
+                list,
+            }) => mcp_install(&paths, &identity, target, project, dry_run, list).map_err(other),
+        },
         Cmd::Web { port } => web::serve(paths, identity, port)
             .await
             .map(|_| 0)
@@ -349,6 +464,50 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
         Cmd::Bridge { which } => match which {
             BridgeCmd::Slack { room, channel } => {
                 bridge::slack::run(paths, identity, room, channel)
+                    .await
+                    .map(|_| 0)
+                    .map_err(other)
+            }
+            BridgeCmd::Teams {
+                room,
+                link,
+                team,
+                channel,
+                list_channels,
+            } => {
+                if list_channels {
+                    return bridge::teams::list_channels(paths)
+                        .await
+                        .map(|_| 0)
+                        .map_err(other);
+                }
+                let Some(room) = room else {
+                    return Err(other(anyhow::anyhow!("need --room")));
+                };
+                let (team, channel) = bridge::teams::resolve(link, team, channel).map_err(other)?;
+                bridge::teams::run(paths, identity, room, team, channel)
+                    .await
+                    .map(|_| 0)
+                    .map_err(other)
+            }
+            BridgeCmd::Buzz {
+                room,
+                relay,
+                channel,
+                list_channels,
+            } => {
+                if list_channels {
+                    return bridge::buzz::list_channels(&relay)
+                        .await
+                        .map(|_| 0)
+                        .map_err(other);
+                }
+                let (Some(room), Some(channel)) = (room, channel) else {
+                    return Err(other(anyhow::anyhow!(
+                        "need --room and --channel. Run with --list-channels to find the channel id."
+                    )));
+                };
+                bridge::buzz::run(paths, identity, room, relay, channel)
                     .await
                     .map(|_| 0)
                     .map_err(other)
@@ -918,6 +1077,193 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             Ok(0)
         }
     }
+}
+
+/// `diavlos hook install`.
+fn hook_install(
+    identity: &str,
+    target: Option<String>,
+    room: Option<String>,
+    project: bool,
+    dry_run: bool,
+    list: bool,
+) -> anyhow::Result<i32> {
+    if list {
+        println!("Diavlos can install a wake-up hook for:\n");
+        for t in hook::TARGETS {
+            println!("  {:<14} {}", t.id, t.label);
+            println!("  {:<14} {}", "", t.note);
+        }
+        println!("\nUse: diavlos hook install --for <tool> --room <room>");
+        return Ok(0);
+    }
+    let Some(target) = target else {
+        anyhow::bail!(
+            "say which tool: --for <{}>, or --list to see them",
+            hook::target_ids()
+        );
+    };
+    let Some(room) = room else {
+        anyhow::bail!("say which room to watch: --room <room>");
+    };
+    let Some(t) = hook::target(&target) else {
+        anyhow::bail!("unknown tool {target}. Try one of: {}", hook::target_ids());
+    };
+    let o = hook::install(t, &room, identity, project, dry_run)?;
+    let what = if dry_run {
+        if o.changed {
+            "would write"
+        } else {
+            "already set"
+        }
+    } else if o.changed {
+        "wrote"
+    } else {
+        "already set"
+    };
+    println!("{:<14} {what} {}", o.tool, o.path.display());
+    if o.changed {
+        println!("{:<14} {}", "", t.note);
+    }
+    Ok(0)
+}
+
+/// `diavlos hook run`: what the hook itself calls. Answers on stdout in the
+/// shape the tool expects, and never blocks: if the helper is not up or the
+/// room is quiet, it says nothing and the agent carries on as normal.
+async fn hook_run(
+    client: &Client,
+    identity: &str,
+    room: &str,
+    session_start: bool,
+) -> Result<i32, Error> {
+    let payload = hook::read_stdin();
+    let stop_hook_active = payload
+        .get("stop_hook_active")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Read from the bookmark without waiting. A hook must never hold up a
+    // turn, so any failure here is silence, not an error.
+    let v = match client
+        .call(&Request::Read {
+            room: room.to_string(),
+            identity: identity.to_string(),
+            since: None,
+            limit: 20,
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => return Ok(0),
+    };
+    let Ok(r) = serde_json::from_value::<ReadResult>(v) else {
+        return Ok(0);
+    };
+    // Skip our own messages and the helper's notices: an agent does not
+    // need waking for what it just said.
+    let mine: Vec<Message> = r
+        .messages
+        .into_iter()
+        .filter(|m| m.from != identity && m.kind != MessageType::System)
+        .collect();
+    if let Some(out) = hook::decide(&mine, stop_hook_active, session_start) {
+        println!("{out}");
+    }
+    Ok(0)
+}
+
+/// `diavlos mcp install`. Prints what it did, one line per file, so the
+/// user can see which files were touched without opening them.
+fn mcp_install(
+    paths: &Paths,
+    identity: &str,
+    target: Option<String>,
+    project: bool,
+    dry_run: bool,
+    list: bool,
+) -> anyhow::Result<i32> {
+    if list {
+        println!("Diavlos can write the MCP config for:\n");
+        for t in install::TOOLS {
+            println!("  {:<14} {}", t.id, t.label);
+            if let Some(n) = t.note {
+                println!("  {:<14} {n}", "");
+            }
+        }
+        println!("\nUse: diavlos mcp install --for <tool>   (or --for all)");
+        return Ok(0);
+    }
+    let Some(target) = target else {
+        anyhow::bail!(
+            "say which tool: --for <{}|all>, or --list to see them",
+            install::tool_ids()
+        );
+    };
+
+    // Pass DIAVLOS_HOME through only when the user set one, so the entry
+    // does not freeze a path they may move.
+    let explicit_home = std::env::var_os("DIAVLOS_HOME")
+        .map(|_| paths.home.clone())
+        .or_else(|| {
+            // --home was given on this invocation.
+            let default = directories::BaseDirs::new().map(|b| b.home_dir().join(".diavlos"));
+            match default {
+                Some(d) if d != paths.home => Some(paths.home.clone()),
+                _ => None,
+            }
+        });
+
+    let targets: Vec<&'static install::Tool> = if target == "all" {
+        install::TOOLS.iter().collect()
+    } else {
+        match install::tool(&target) {
+            Some(t) => vec![t],
+            None => anyhow::bail!(
+                "unknown tool {target}. Try one of: {}, all",
+                install::tool_ids()
+            ),
+        }
+    };
+
+    let mut failed = 0;
+    for t in targets {
+        match install::install(t, project, identity, explicit_home.as_deref(), dry_run) {
+            Ok(o) => {
+                let what = if dry_run {
+                    if o.changed {
+                        "would write"
+                    } else {
+                        "already set"
+                    }
+                } else if o.changed {
+                    "wrote"
+                } else {
+                    "already set"
+                };
+                println!("{:<14} {what} {}", o.tool, o.path.display());
+                if let Some(b) = &o.backup {
+                    println!("{:<14} kept a copy of the old file at {}", "", b.display());
+                }
+                if o.changed && !dry_run {
+                    if let Some(n) = t.note {
+                        println!("{:<14} {n}", "");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{:<14} {e:#}", t.label);
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        return Ok(1);
+    }
+    if !dry_run {
+        println!("\nRestart the tool and the room tools are there: diavlos_send, diavlos_next, diavlos_ask and five more.");
+    }
+    Ok(0)
 }
 
 fn short(node: &str) -> String {

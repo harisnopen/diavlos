@@ -1,0 +1,235 @@
+name: Diavlos
+description: Send a message to a Diavlos room from CI, or ask a human for a signed approval and wait for it.
+branding:
+  icon: message-square
+  color: green
+
+inputs:
+  room:
+    description: The room name.
+    required: true
+  mode:
+    description: 'send (post a message and return) or ask (post a question and wait for an answer).'
+    required: false
+    default: send
+  text:
+    description: The message body.
+    required: true
+  invite:
+    description: >
+      A dv1. invite token. Used the first time this runner joins the room.
+      Keep it in a secret. An invite is single use, so for repeat runs cache
+      the state directory (see `home`) or pass a fresh invite.
+    required: false
+    default: ''
+  identity:
+    description: Which local key to act as. Must match the name the invite grants.
+    required: false
+    default: default
+  type:
+    description: 'send only: chat, task, question, reply, done, claim, release.'
+    required: false
+    default: task
+  to:
+    description: 'send only: address the message to one member by name.'
+    required: false
+    default: ''
+  data:
+    description: 'send only: any JSON, passed through as the message data.'
+    required: false
+    default: ''
+  action:
+    description: >
+      ask only. Structured intent as JSON, e.g.
+      {"verb":"deploy","target":"api-service","params":{"version":"1.2"}}.
+      When set, only a human-signed approve or deny ends the wait, and the
+      approval is bound to this exact action.
+    required: false
+    default: ''
+  timeout:
+    description: 'ask only: seconds to wait for an answer.'
+    required: false
+    default: '600'
+  trace:
+    description: Ties every message from this run together. Defaults to the run id.
+    required: false
+    default: ''
+  version:
+    description: Diavlos version to install, e.g. v1.0.0. Defaults to the latest release.
+    required: false
+    default: latest
+  home:
+    description: >
+      State directory. Defaults to a path inside the runner's temp dir.
+      Point this at a cached path to keep the room membership between runs.
+    required: false
+    default: ''
+
+outputs:
+  answer:
+    description: The answer text, for mode=ask. Empty otherwise.
+    value: ${{ steps.run.outputs.answer }}
+  message:
+    description: The full message JSON that came back, for mode=ask.
+    value: ${{ steps.run.outputs.message }}
+  approved:
+    description: '"true" when a human approved, "false" on a deny or a timeout.'
+    value: ${{ steps.run.outputs.approved }}
+  outcome:
+    description: 'One of: sent, approved, denied, timeout.'
+    value: ${{ steps.run.outputs.outcome }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install diavlos
+      shell: bash
+      env:
+        DIAVLOS_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if command -v diavlos >/dev/null 2>&1; then
+          echo "diavlos already on PATH: $(diavlos --version)"
+          exit 0
+        fi
+        os=$(uname -s | tr '[:upper:]' '[:lower:]')
+        arch=$(uname -m)
+        case "$os" in
+          linux) os=unknown-linux-gnu ;;
+          darwin) os=apple-darwin ;;
+          *) echo "::error::this action needs a Linux or macOS runner (got $os)"; exit 1 ;;
+        esac
+        case "$arch" in
+          x86_64|amd64) arch=x86_64 ;;
+          arm64|aarch64) arch=aarch64 ;;
+          *) echo "::error::unsupported architecture $arch"; exit 1 ;;
+        esac
+        target="${arch}-${os}"
+        if [ "$DIAVLOS_VERSION" = "latest" ]; then
+          url="https://github.com/harisnopen/diavlos/releases/latest/download/diavlos-${target}.tar.gz"
+        else
+          url="https://github.com/harisnopen/diavlos/releases/download/${DIAVLOS_VERSION}/diavlos-${target}.tar.gz"
+        fi
+        tmp=$(mktemp -d)
+        echo "downloading $url"
+        curl -fsSL "$url" -o "$tmp/diavlos.tar.gz"
+        # Every release ships a sigstore bundle. Check it when cosign is here.
+        if command -v cosign >/dev/null 2>&1; then
+          if curl -fsSL "${url}.sigstore.json" -o "$tmp/bundle.json"; then
+            cosign verify-blob --bundle "$tmp/bundle.json" \
+              --certificate-identity-regexp "https://github.com/harisnopen/diavlos/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$tmp/diavlos.tar.gz" && echo "signature ok"
+          fi
+        fi
+        tar -xzf "$tmp/diavlos.tar.gz" -C "$tmp"
+        mkdir -p "$HOME/.local/bin"
+        install -m 755 "$tmp/diavlos" "$HOME/.local/bin/diavlos"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/bin/diavlos" --version
+
+    - name: Join the room
+      shell: bash
+      env:
+        DIAVLOS_INVITE: ${{ inputs.invite }}
+        DIAVLOS_ROOM: ${{ inputs.room }}
+        DIAVLOS_AS: ${{ inputs.identity }}
+        DIAVLOS_HOME_IN: ${{ inputs.home }}
+      run: |
+        set -euo pipefail
+        home="${DIAVLOS_HOME_IN:-${RUNNER_TEMP:-/tmp}/diavlos}"
+        mkdir -p "$home"
+        chmod 700 "$home"
+        echo "DIAVLOS_HOME=$home" >> "$GITHUB_ENV"
+        export DIAVLOS_HOME="$home"
+        joined='import json,os,sys; rooms=json.load(open(sys.argv[1])).get("rooms") or []; sys.exit(0 if any(r.get("name")==os.environ["DIAVLOS_ROOM"] and os.environ["DIAVLOS_AS"] in (r.get("me") or []) for r in rooms) else 1)'
+        if diavlos status --json > "$home/.status.json" 2>/dev/null \
+           && python3 -c "$joined" "$home/.status.json" 2>/dev/null; then
+          echo "already in $DIAVLOS_ROOM as $DIAVLOS_AS"
+          rm -f "$home/.status.json"
+          exit 0
+        fi
+        rm -f "$home/.status.json"
+        if [ -z "$DIAVLOS_INVITE" ]; then
+          echo "::error::not a member of $DIAVLOS_ROOM and no invite given. Pass invite:, or cache the home directory between runs."
+          exit 1
+        fi
+        # Never let the token reach the log.
+        printf '%s' "$DIAVLOS_INVITE" > "$home/.invite"
+        if ! diavlos --as "$DIAVLOS_AS" join "$(cat "$home/.invite")" > "$home/.join.log" 2>&1; then
+          code=$?
+          rm -f "$home/.invite"
+          sed -e 's/dv1\.[A-Za-z0-9_-]*/dv1.<redacted>/g' "$home/.join.log" >&2 || true
+          echo "::error::join failed with exit code $code"
+          exit "$code"
+        fi
+        rm -f "$home/.invite"
+        sed -e 's/dv1\.[A-Za-z0-9_-]*/dv1.<redacted>/g' "$home/.join.log"
+
+    - name: Send or ask
+      id: run
+      shell: bash
+      env:
+        DIAVLOS_ROOM: ${{ inputs.room }}
+        DIAVLOS_AS: ${{ inputs.identity }}
+        DIAVLOS_MODE: ${{ inputs.mode }}
+        DIAVLOS_TEXT: ${{ inputs.text }}
+        DIAVLOS_TYPE: ${{ inputs.type }}
+        DIAVLOS_TO: ${{ inputs.to }}
+        DIAVLOS_DATA: ${{ inputs.data }}
+        DIAVLOS_ACTION: ${{ inputs.action }}
+        DIAVLOS_TIMEOUT: ${{ inputs.timeout }}
+        DIAVLOS_TRACE: ${{ inputs.trace }}
+      run: |
+        set -uo pipefail
+        trace="${DIAVLOS_TRACE:-gh-${GITHUB_RUN_ID:-local}}"
+        out() { printf '%s<<__DIAVLOS_EOF__\n%s\n__DIAVLOS_EOF__\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+
+        if [ "$DIAVLOS_MODE" = "send" ]; then
+          args=(--as "$DIAVLOS_AS" send "$DIAVLOS_ROOM" "$DIAVLOS_TEXT"
+                --type "$DIAVLOS_TYPE" --trace "$trace")
+          if [ -n "$DIAVLOS_TO" ]; then args+=(--to "$DIAVLOS_TO"); fi
+          if [ -n "$DIAVLOS_DATA" ]; then args+=(--data "$DIAVLOS_DATA"); fi
+          diavlos "${args[@]}"
+          code=$?
+          out answer ""
+          out message ""
+          out approved "false"
+          out outcome "sent"
+          exit "$code"
+        fi
+
+        if [ "$DIAVLOS_MODE" != "ask" ]; then
+          echo "::error::mode must be send or ask, got '$DIAVLOS_MODE'"
+          exit 1
+        fi
+
+        args=(--as "$DIAVLOS_AS" ask "$DIAVLOS_ROOM" "$DIAVLOS_TEXT"
+              --timeout "$DIAVLOS_TIMEOUT" --trace "$trace" --json)
+        if [ -n "$DIAVLOS_ACTION" ]; then args+=(--action "$DIAVLOS_ACTION"); fi
+        reply=$(diavlos "${args[@]}")
+        code=$?
+        out message "$reply"
+        answer=$(printf '%s' "$reply" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("text",""))' 2>/dev/null)
+        out answer "$answer"
+        case "$code" in
+          0)
+            out approved "true"
+            out outcome "approved"
+            ;;
+          6)
+            out approved "false"
+            out outcome "denied"
+            echo "::error::a human denied it: $answer"
+            ;;
+          4)
+            out approved "false"
+            out outcome "timeout"
+            echo "::error::no human answered within ${DIAVLOS_TIMEOUT}s. A timeout is a no."
+            ;;
+          *)
+            out approved "false"
+            out outcome "error"
+            ;;
+        esac
+        exit "$code"
