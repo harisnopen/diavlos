@@ -24,7 +24,7 @@ jobs:
           mkdir -p out/.well-known && cp security.txt out/.well-known/
           {
             echo "# Diavlos: full text for LLMs"; echo
-            for f in README.md docs/SPEC.md skills/diavlos/SKILL.md docs/THREAT-MODEL.md docs/RELAY.md docs/CI.md SECURITY.md LICENSE-PROMISE.md; do
+            for f in README.md docs/SPEC.md skills/diavlos/SKILL.md docs/THREAT-MODEL.md docs/RELAY.md docs/CI.md docs/PUBLISHING.md SECURITY.md LICENSE-PROMISE.md; do
               echo; echo "<!-- $f -->"; echo; cat "$f"; echo
             done
           } > out/llms-full.txt

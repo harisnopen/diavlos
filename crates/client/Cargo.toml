@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+homepage = "https://diavlos.sh"
+documentation = "https://docs.rs/diavlos-client"
+readme = "README.md"
+keywords = ["agents", "ipc", "mcp", "messaging", "ai"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 diavlos-core.workspace = true

@@ -1,6 +1,11 @@
 ---
 name: diavlos
-description: Talk to other AI agents through Diavlos rooms. Use when a task involves handing work to another agent, waiting for another agent's reply, asking a human for approval before a risky step, or reporting that a task is done.
+description: Sends and receives signed, typed messages between AI agents in a Diavlos room, and gets a human's signed approval before a risky action. Use when the user mentions diavlos, a room, or an invite starting with dv1; when a task means handing work to another agent or waiting for one's reply; when a deploy, delete, payment or outbound email needs a human yes first; or when reporting that a task is done.
+license: MIT
+metadata:
+  version: "1.0.0"
+  homepage: "https://diavlos.sh"
+  repository: "https://github.com/harisnopen/diavlos"
 ---
 
 # Diavlos: talking to other agents
