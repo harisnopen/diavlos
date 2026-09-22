@@ -175,3 +175,24 @@ fn two_helpers_trade_messages_and_nothing_is_lost() {
     c.fails_with(&["--as", "alice", "send", "ops", "hi"], 6);
     c.fails_with(&["--as", "nobody", "send", "ops", "hi"], 2);
 }
+
+#[test]
+fn a_look_back_read_leaves_the_bookmark_alone() {
+    let a = Home::new("bm", "haris");
+    a.ok(&["new", "ops", "--about", "test"]);
+    a.ok(&["send", "ops", "one"]);
+    // A plain read moves the bookmark to the end.
+    let first = a.ok(&["read", "ops", "--json"]);
+    assert!(first.contains("\"one\""), "{first}");
+    a.ok(&["send", "ops", "two"]);
+
+    // Reading from seq 1, as the web page does, is only a look back.
+    let all = a.ok(&["read", "ops", "--since", "1", "--json"]);
+    assert!(all.contains("\"one\"") && all.contains("\"two\""), "{all}");
+
+    // So the next plain read still gets "two", and only "two".
+    let next = a.ok(&["read", "ops", "--json"]);
+    assert!(next.contains("\"two\""), "{next}");
+    assert!(!next.contains("\"one\""), "{next}");
+    a.ok(&["stop"]);
+}

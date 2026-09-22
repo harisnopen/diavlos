@@ -783,7 +783,9 @@ async fn next(helper: &Helper, room: &str, identity: &str, timeout_secs: u64) ->
 }
 
 /// Read from your bookmark onward. Never deletes. Moves the bookmark to
-/// the last message returned.
+/// the last message returned. A read from a given `since` is a look back:
+/// it leaves the bookmark where it is, so a web page or a script paging
+/// through the log never makes an agent miss or repeat a message.
 async fn read(
     helper: &Helper,
     room: &str,
@@ -801,8 +803,10 @@ async fn read(
     let messages = helper
         .store
         .messages_after(&room.id, start, limit.clamp(1, 1000))?;
-    if let Some(last) = messages.last() {
-        helper.store.set_bookmark(&room.id, &reader, last.seq)?;
+    if since.is_none() {
+        if let Some(last) = messages.last() {
+            helper.store.set_bookmark(&room.id, &reader, last.seq)?;
+        }
     }
     Ok(ReadResult {
         bookmark: helper.store.bookmark(&room.id, &reader)?,

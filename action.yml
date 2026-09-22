@@ -76,7 +76,7 @@ outputs:
     description: '"true" when a human approved, "false" on a deny or a timeout.'
     value: ${{ steps.run.outputs.approved }}
   outcome:
-    description: 'One of: sent, approved, denied, timeout.'
+    description: 'One of: sent, approved, answered, denied, timeout, error.'
     value: ${{ steps.run.outputs.outcome }}
 
 runs:
@@ -115,12 +115,16 @@ runs:
         curl -fsSL "$url" -o "$tmp/diavlos.tar.gz"
         # Every release ships a sigstore bundle. Check it when cosign is here.
         if command -v cosign >/dev/null 2>&1; then
-          if curl -fsSL "${url}.sigstore.json" -o "$tmp/bundle.json"; then
-            cosign verify-blob --bundle "$tmp/bundle.json" \
-              --certificate-identity-regexp "https://github.com/harisnopen/diavlos/" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              "$tmp/diavlos.tar.gz" && echo "signature ok"
+          # A bad or missing signature stops the step.
+          curl -fsSL "${url}.sigstore.json" -o "$tmp/bundle.json"
+          if ! cosign verify-blob --bundle "$tmp/bundle.json" \
+            --certificate-identity-regexp "^https://github.com/harisnopen/diavlos/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$tmp/diavlos.tar.gz"; then
+            echo "::error::signature check failed; not installing"
+            exit 1
           fi
+          echo "signature ok"
         fi
         tar -xzf "$tmp/diavlos.tar.gz" -C "$tmp"
         mkdir -p "$HOME/.local/bin"
@@ -211,11 +215,20 @@ runs:
         code=$?
         out message "$reply"
         answer=$(printf '%s' "$reply" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("text",""))' 2>/dev/null)
+        kind=$(printf '%s' "$reply" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("type",""))' 2>/dev/null)
         out answer "$answer"
         case "$code" in
           0)
-            out approved "true"
-            out outcome "approved"
+            # Exit 0 only means someone answered. Without an action, any
+            # member's reply ends the wait, and "no, don't" is a reply too.
+            # Only a human-signed approve is a yes.
+            if [ "$kind" = "approve" ]; then
+              out approved "true"
+              out outcome "approved"
+            else
+              out approved "false"
+              out outcome "answered"
+            fi
             ;;
           6)
             out approved "false"

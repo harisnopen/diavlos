@@ -276,12 +276,10 @@ tools.\n\n{}",
             }
         }));
     }
+    // Stop takes its decision at the top level, not in hookSpecificOutput.
     Some(json!({
-        "hookSpecificOutput": {
-            "hookEventName": "Stop",
-            "decision": "block",
-            "reason": body
-        }
+        "decision": "block",
+        "reason": body
     }))
 }
 
@@ -351,10 +349,9 @@ mod tests {
     #[test]
     fn a_waiting_message_blocks_the_stop_and_carries_the_text() {
         let out = decide(&[msg(4, "boss", "deploy is green")], false, false).unwrap();
-        let h = &out["hookSpecificOutput"];
-        assert_eq!(h["hookEventName"], "Stop");
-        assert_eq!(h["decision"], "block");
-        let reason = h["reason"].as_str().unwrap();
+        assert!(out.get("hookSpecificOutput").is_none());
+        assert_eq!(out["decision"], "block");
+        let reason = out["reason"].as_str().unwrap();
         assert!(reason.contains("deploy is green"));
         assert!(reason.contains("boss"));
         // The agent is reminded what a room message is and is not.
@@ -371,7 +368,7 @@ mod tests {
             params: Value::Null,
         });
         let out = decide(&[m], false, false).unwrap();
-        assert!(out["hookSpecificOutput"]["reason"]
+        assert!(out["reason"]
             .as_str()
             .unwrap()
             .contains("[action: deploy api]"));
