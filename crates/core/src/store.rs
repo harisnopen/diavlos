@@ -111,6 +111,16 @@ const MIGRATIONS: &[M<'static>] = &[
     );
     "#,
     ),
+    // `received` is this helper's own clock when it stored the message.
+    // Limits count by it: `ts` is the sender's word and can be backdated.
+    M::up(
+        r#"
+    ALTER TABLE messages ADD COLUMN received TEXT;
+    UPDATE messages SET received = ts;
+    CREATE INDEX messages_room_from_received ON messages(room_id, from_name, received);
+    CREATE INDEX messages_room_received ON messages(room_id, received);
+    "#,
+    ),
 ];
 
 /// The store. Safe to share between threads; one connection, one lock.
@@ -578,8 +588,8 @@ impl Store {
             )));
         }
         conn.execute(
-            "INSERT INTO messages (room_id, seq, id, from_name, type, ts, prev, chain_hash, envelope, reply_to)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO messages (room_id, seq, id, from_name, type, ts, prev, chain_hash, envelope, reply_to, received)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 msg.room,
                 msg.seq as i64,
@@ -591,6 +601,7 @@ impl Store {
                 msg.chain_hash(),
                 serde_json::to_string(&msg.envelope())?,
                 msg.reply_to,
+                crate::message::now_ts(),
             ],
         )?;
         if msg.tombstone {
@@ -877,12 +888,12 @@ impl Store {
     ) -> Result<u32> {
         let n: i64 = match from {
             Some(f) => conn.query_row(
-                "SELECT COUNT(*) FROM messages WHERE room_id=?1 AND from_name=?2 AND ts>=?3",
+                "SELECT COUNT(*) FROM messages WHERE room_id=?1 AND from_name=?2 AND received>=?3",
                 params![room_id, f, since],
                 |r| r.get(0),
             )?,
             None => conn.query_row(
-                "SELECT COUNT(*) FROM messages WHERE room_id=?1 AND ts>=?2",
+                "SELECT COUNT(*) FROM messages WHERE room_id=?1 AND received>=?2",
                 params![room_id, since],
                 |r| r.get(0),
             )?,
@@ -1095,5 +1106,26 @@ mod tests {
         // Another sender is under the per-minute limit but the daily
         // budget is about to be hit: the alert fires on the third message.
         assert!(s.check_limits("r_test", "bob", &limits).unwrap());
+    }
+
+    #[test]
+    fn a_backdated_ts_still_counts_against_the_limits() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let limits = Limits {
+            per_minute_per_sender: 2,
+            daily_per_room: 100,
+            burst_alert_percent: 100,
+        };
+        for text in ["1", "2"] {
+            let mut m = msg(&owner, text);
+            m.ts = "2000-01-01T00:00:00Z".into();
+            s.sequence_and_append(&mut m).unwrap();
+        }
+        assert!(matches!(
+            s.check_limits("r_test", "haris", &limits),
+            Err(Error::OverBudget(_))
+        ));
     }
 }

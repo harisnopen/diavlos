@@ -1,6 +1,6 @@
 # The Diavlos message format
 
-Version 1. Last changed 2026-09-21.
+Version 1. Last changed 2026-09-22.
 
 This document describes the wire format completely enough to write a second
 implementation. It is published on its own, under MIT, so that the format
@@ -30,8 +30,12 @@ The rules are:
 - Strings use standard JSON escaping. Escape `"`, `\`, and the control
   characters below `0x20`. Do not escape anything else; in particular emit
   non-ASCII characters as UTF-8, not as `\uXXXX`.
-- Numbers are emitted in their shortest round-tripping form. Every number in
-  this format is a non-negative integer, so this is unambiguous.
+- Numbers are emitted in their shortest round-tripping form. Every number the
+  format itself defines (`v`, `seq`) is a non-negative integer, written in
+  plain decimal. `data` and `action.params` may hold any JSON number, and
+  languages disagree on how to spell some non-integers (`1e21` against
+  `1e+21`). The reference implementation writes them as Rust's `serde_json`
+  does. To be portable, put non-integer values in strings.
 - `null`, `true` and `false` are spelled as in JSON.
 
 A hash written in this format is the string `sha256:` followed by the
@@ -71,13 +75,17 @@ Every identity carries, alongside its key:
 | Field | Meaning |
 |---|---|
 | `name` | The name it goes by in a room. Unique per room. |
-| `kind` | `human` or `agent`. Only a `human` key can approve. |
+| `kind` | `human`, `agent` or `service`. Only a `human` key can approve. |
 | `profile` | Optional free-form facts (`vendor`, `model`, `owner`). |
 | `claims` | Optional signed statements from a third party. Opaque here. |
 
-Names are lowercase ASCII letters, digits and hyphens, 1 to 32 characters,
-not starting or ending with a hyphen. Implementations must reject anything
+A `service` key is a program acting for the room rather than for a person,
+such as a bridge. It may do what an agent may, and no more.
+
+Names are lowercase ASCII letters, digits, `-` and `_`, 1 to 32
+characters, starting with a letter. Implementations must reject anything
 else, because a name that can be confused with another name is an attack.
+The same rule covers room names.
 
 ## 2. Messages
 
@@ -125,7 +133,7 @@ there is no second, internal representation.
 | `reply_to` | string or null | sender | The `id` this answers. |
 | `to` | string or null | sender | A member name, when addressed to one. |
 | `class` | string | sender | `public`, `internal`, `confidential` or `pii`. |
-| `ts` | string | sender | RFC 3339 UTC, second precision, `Z` suffix. |
+| `ts` | string | sender | RFC 3339 UTC, second precision, `Z` suffix. The home refuses any other spelling, and any `ts` more than 300 seconds ahead of its own clock. An old `ts` is fine: a message may wait in an outbox. |
 | `action_hash` | string | sender | Approvals only. See 2.5. |
 | `expires` | string | sender | Approvals only. |
 | `once` | boolean | sender | Approvals only. |
@@ -133,8 +141,9 @@ there is no second, internal representation.
 | `content_hash` | string | — | Present only on tombstones and in bundles. |
 | `tombstone` | boolean | — | True when the content was erased. |
 
-The last four fields are omitted entirely when absent, rather than sent as
-`null`. Every other field is always present.
+`action_hash`, `expires`, `once` and `content_hash` are omitted entirely
+when absent, rather than sent as `null`, and `tombstone` is omitted when
+false. Every other field, `sig` included, is always present.
 
 A message must be at most **65536 bytes** of JSON. Larger payloads are sent
 by reference: put a hash, a size and a location in `data`.
@@ -179,6 +188,7 @@ The sender signs the canonical JSON of this object, and only this object:
   "reply_to": …,
   "room": …,
   "to": …,
+  "trace": …,
   "ts": …,
   "type": …,
   "v": …
@@ -236,13 +246,17 @@ An `approve` message carries three extra fields:
 | `expires` | RFC 3339 UTC. After this the approve does not count. |
 | `once` | `true`: this approve may be spent exactly once. |
 
-`expires` defaults to 600 seconds after `ts`.
+All three are required on an approve, and `once` must be `true`: the home
+refuses an approve without them. The reference implementation sets
+`expires` to 600 seconds after `ts`.
 
 Before acting, an implementation checks all of:
 
 1. The signature verifies against the approver's public key.
 2. The approver's `kind` is `human`.
-3. The approver has the approver role in this room.
+3. The approver has the approver role in this room (or owns it), and is
+   not revoked, muted or past the end of their grant, at the time of the
+   check, not only when the approve was sent.
 4. `action_hash` equals the hash of the action about to be performed.
 5. `ts` is not in the future and `expires` is not in the past.
 6. If `once` is true, this approve has not been spent before.
@@ -265,7 +279,7 @@ The **chain hash** of a message is the hash of its envelope:
   "action_hash": …, "agent": …, "class": …, "content_hash": …,
   "expires": …, "from": …, "id": …, "once": …, "prev": …,
   "reply_to": …, "room": …, "seq": …, "sig": …, "to": …,
-  "ts": …, "type": …, "v": …
+  "trace": …, "ts": …, "type": …, "v": …
 }
 ```
 
@@ -291,7 +305,8 @@ Erasing a message removes `text`, `action` and `data`, sets `tombstone` to
 The envelope is unchanged, because the envelope never contained the content
 in the first place. So the signature still verifies and the chain is still
 whole. A verifier reports the number of tombstones it saw; it does not treat
-them as damage.
+them as damage. A tombstone must carry no `text`, `action` or `data`; one
+that does is damage, because its content is not checked against anything.
 
 ## 3. Invites
 
@@ -318,6 +333,10 @@ token.
 ```
 
 The owner signs the canonical JSON of the whole object with `sig` removed.
+An unset `for_node` should be left out of the signed object; a verifier
+must also accept a signature made with `"for_node": null`, which means the
+same thing. The reference implementation knows exactly the fields shown and
+drops any other, so a new invite field needs a new `v`.
 
 | Field | Meaning |
 |---|---|
@@ -377,7 +396,9 @@ many bytes of a JSON object tagged with `t`.
 
 A member that cannot reach the home queues its messages on its own disk and
 submits them when the link comes back. Nothing is lost, and nothing is
-delivered twice, because `id` is unique and `seq` is assigned once.
+stored twice, because `id` is unique and `seq` is assigned once. Delivery
+is at least once: a submit whose answer was lost is sent again, so a
+reader must dedupe by `id`.
 
 ## 5. Audit bundles
 
@@ -390,16 +411,24 @@ Verification needs no network and no helper:
 2. The chain is whole from the first message in the range.
 3. If the range starts at `seq` 1, it starts from genesis.
 
-The reference implementation reports the room, who exported it and when, the
-range, the number of tombstones, and whether the chain reaches genesis.
+A bundle proves it is whole and consistent with itself. It does not prove
+whose room it is: the owner key comes from the bundle, and anyone can make
+a key and a room. So a verifier must also check the owner key against one
+it already trusts. The reference implementation reports the room, who
+exported it and when, the range, the number of tombstones, whether the
+chain reaches genesis, and the owner key's fingerprint; `verify --owner
+<fingerprint>` fails any bundle with a different owner.
 
 ## 6. Growing the format
 
 `v` is the schema version and it is `1`.
 
-- Adding an optional field, or a new `type`, does not change `v`. An
-  implementation that does not know a field must preserve it when relaying
-  and include it when verifying, because it is inside the signature.
+- Adding a new `type` does not change `v`.
+- The signing object and the envelope are exactly the fields listed in 2.3
+  and 2.6. A field outside them is not signed, so an implementation must
+  not act on one, and the reference implementation drops it. So adding a
+  field that anyone should rely on changes the signing object, which needs
+  a new `v`.
 - Changing the meaning of a field, the signing object, or the chain
   construction requires a new `v` and a new ALPN.
 

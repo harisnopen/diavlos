@@ -1,5 +1,6 @@
 //! Run the helper as a service: systemd (Linux), launchd (macOS), or a
-//! Windows service. Config file, not just flags.
+//! logon entry for the user (Windows). Always as the user, never as root
+//! or SYSTEM. Config file, not just flags.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -7,6 +8,20 @@ use std::process::Command;
 use diavlos_client::Paths;
 
 const NAME: &str = "diavlos";
+
+/// Per-user programs to start at logon.
+#[cfg(windows)]
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Did an older version register the SYSTEM-level Windows service?
+#[cfg(windows)]
+fn legacy_service_exists() -> bool {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .and_then(|m| m.open_service(NAME, ServiceAccess::QUERY_STATUS))
+        .is_ok()
+}
 
 fn exe() -> anyhow::Result<PathBuf> {
     Ok(std::env::current_exe()?)
@@ -28,6 +43,25 @@ fn plist_path() -> anyhow::Result<PathBuf> {
         .home_dir()
         .join("Library/LaunchAgents")
         .join("sh.diavlos.helper.plist"))
+}
+
+/// One ExecStart word, so a path with a space, `%` or `$` stays one path.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_quote(s: &str) -> String {
+    let inner = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%")
+        .replace('$', "$$");
+    format!("\"{inner}\"")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn run(cmd: &mut Command) -> String {
@@ -53,8 +87,8 @@ pub fn install(paths: &Paths) -> anyhow::Result<Vec<String>> {
                 "[Unit]\nDescription=Diavlos helper\nAfter=network-online.target\n\n\
                  [Service]\nExecStart={} --home {} helper\nRestart=always\nRestartSec=2\n\n\
                  [Install]\nWantedBy=default.target\n",
-                exe.display(),
-                home
+                systemd_quote(&exe.display().to_string()),
+                systemd_quote(&home)
             ),
         )?;
         out.push(format!("wrote {}", unit.display()));
@@ -88,8 +122,8 @@ pub fn install(paths: &Paths) -> anyhow::Result<Vec<String>> {
   <key>KeepAlive</key><true/>
 </dict></plist>
 "#,
-                exe.display(),
-                home
+                xml_escape(&exe.display().to_string()),
+                xml_escape(&home)
             ),
         )?;
         out.push(format!("wrote {}", plist.display()));
@@ -103,40 +137,32 @@ pub fn install(paths: &Paths) -> anyhow::Result<Vec<String>> {
     }
     #[cfg(windows)]
     {
-        use std::ffi::OsString;
-        use windows_service::service::{
-            ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceType,
-        };
-        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-        let manager = ServiceManager::local_computer(
-            None::<&str>,
-            ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
-        )?;
-        let info = ServiceInfo {
-            name: OsString::from(NAME),
-            display_name: OsString::from("Diavlos helper"),
-            service_type: ServiceType::OWN_PROCESS,
-            start_type: ServiceStartType::AutoStart,
-            error_control: ServiceErrorControl::Normal,
-            executable_path: exe.clone(),
-            launch_arguments: vec![
-                OsString::from("--home"),
-                OsString::from(&home),
-                OsString::from("helper"),
-                OsString::from("--service"),
-            ],
-            dependencies: vec![],
-            account_name: None,
-            account_password: None,
-        };
-        let service =
-            manager.create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?;
-        service.set_description("Diavlos helper: the channel between AI agents")?;
-        out.push(format!("registered Windows service {NAME}"));
-        match service.start::<OsString>(&[]) {
-            Ok(()) => out.push("started".into()),
-            Err(e) => out.push(format!("start: {e}")),
+        // Not a Windows service: that runs as LocalSystem, which is far more
+        // power than a network-facing program holding one person's keys
+        // needs, and cannot read that person's Credential Manager anyway.
+        // Instead start at logon, as the user, from their own Run key. No
+        // admin needed. conhost --headless keeps a console window from
+        // opening for it.
+        let cmd = format!(
+            "conhost.exe --headless \"{}\" --home \"{home}\" helper",
+            exe.display()
+        );
+        out.push(format!(
+            "start at logon ({RUN_KEY}\\{NAME}): {}",
+            run(Command::new("reg")
+                .args(["add", RUN_KEY, "/v", NAME, "/t", "REG_SZ", "/d", &cmd, "/f"]))
+        ));
+        if legacy_service_exists() {
+            out.push(format!(
+                "an older install registered a Windows service {NAME} that runs as SYSTEM; \
+                 remove it from an admin prompt with: sc.exe delete {NAME}"
+            ));
         }
+        // Start it now rather than at the next logon: any command does.
+        out.push(format!(
+            "start now: {}",
+            run(Command::new(&exe).args(["--home", &home, "status"]))
+        ));
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
@@ -180,16 +206,41 @@ pub fn uninstall(_paths: &Paths) -> anyhow::Result<Vec<String>> {
     }
     #[cfg(windows)]
     {
-        use windows_service::service::ServiceAccess;
-        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-        let service = manager.open_service(
-            NAME,
-            ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
-        )?;
-        let _ = service.stop();
-        service.delete()?;
-        out.push(format!("removed Windows service {NAME}"));
+        out.push(format!(
+            "remove start at logon: {}",
+            run(Command::new("reg").args(["delete", RUN_KEY, "/v", NAME, "/f"]))
+        ));
+        out.push(format!(
+            "stop the helper: {}",
+            run(Command::new(exe()?).args(["--home", &_paths.home.display().to_string(), "stop"]))
+        ));
+        // An older install used a Windows service. Remove it if we may;
+        // it takes an admin prompt, so say how if we may not.
+        if legacy_service_exists() {
+            use windows_service::service::ServiceAccess;
+            use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+            let removed =
+                ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+                    .and_then(|m| {
+                        m.open_service(
+                            NAME,
+                            ServiceAccess::STOP
+                                | ServiceAccess::DELETE
+                                | ServiceAccess::QUERY_STATUS,
+                        )
+                    })
+                    .and_then(|svc| {
+                        let _ = svc.stop();
+                        svc.delete()
+                    });
+            out.push(match removed {
+                Ok(()) => format!("removed the older Windows service {NAME}"),
+                Err(e) => format!(
+                    "could not remove the older Windows service {NAME} ({e}); \
+                     from an admin prompt run: sc.exe delete {NAME}"
+                ),
+            });
+        }
     }
     if out.is_empty() {
         out.push("nothing to remove on this platform".into());
@@ -254,4 +305,19 @@ pub fn run_as_service(paths: Paths) -> anyhow::Result<()> {
 
     windows_service::service_dispatcher::start(NAME, ffi_service_main)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_with_spaces_and_specials_stay_one_word() {
+        assert_eq!(
+            systemd_quote("/home/Jane Doe/.diavlos"),
+            "\"/home/Jane Doe/.diavlos\""
+        );
+        assert_eq!(systemd_quote(r#"/a%b$c"d\e"#), r#""/a%%b$$c\"d\\e""#);
+        assert_eq!(xml_escape("/Users/A&B <x>"), "/Users/A&amp;B &lt;x&gt;");
+    }
 }

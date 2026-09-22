@@ -162,14 +162,16 @@ impl Member {
         if self.is_expired(now) {
             return Err(Error::Denied(format!("{}'s role has expired", self.name)));
         }
+        // The rule is on the key, not the role: not even the owner may
+        // approve with an agent key.
+        if matches!(kind, MessageType::Approve | MessageType::Deny) && self.kind != Kind::Human {
+            return Err(Error::Denied(format!("only a human key may send {kind}")));
+        }
         if is_owner {
             return Ok(());
         }
         if matches!(kind, MessageType::Control | MessageType::System) {
             return Err(Error::Denied(format!("only the owner may send {kind}")));
-        }
-        if matches!(kind, MessageType::Approve | MessageType::Deny) && self.kind != Kind::Human {
-            return Err(Error::Denied(format!("only a human key may send {kind}")));
         }
         if !self.role.may_send(kind) {
             return Err(Error::Denied(format!(
@@ -225,6 +227,14 @@ mod tests {
         let human = member(Kind::Human, Role::Approver);
         assert!(human
             .check_may_send(MessageType::Approve, false, "2026-01-02T00:00:00Z")
+            .is_ok());
+        // Owning the room does not turn an agent key into a person.
+        let owner = member(Kind::Agent, Role::Approver);
+        assert!(owner
+            .check_may_send(MessageType::Approve, true, "2026-01-02T00:00:00Z")
+            .is_err());
+        assert!(owner
+            .check_may_send(MessageType::Control, true, "2026-01-02T00:00:00Z")
             .is_ok());
     }
 

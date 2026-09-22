@@ -194,11 +194,11 @@ Owner and ops:
 | `diavlos mute <room> <name> [--off]` / `diavlos revoke <room> <name>` | Silence one member, or cut their key for good. |
 | `diavlos policy <room>` | Edit the room's rule file. One rule for now: which verbs need a human approve. |
 | `diavlos export <room> --since 2026-01-01 > bundle.jsonl` | Signed audit bundle. |
-| `diavlos verify bundle.jsonl` | Check a bundle: every signature, the chain, membership. Works with no helper running. |
+| `diavlos verify bundle.jsonl [--owner <fingerprint>]` | Check a bundle: every signature, the chain, membership. Works with no helper running. Prints the owner key; pass `--owner` with the fingerprint from `diavlos who` to prove whose room it is. |
 | `diavlos hold <room> --on` | Legal hold. Retention stops deleting. |
 | `diavlos events --follow` | JSONL stream of everything the helper does. Feed it to Splunk. |
 | `diavlos doctor` | Checks config, network, keys, disk. Paste the output in a support ticket. |
-| `diavlos service install` | Run the helper as a systemd, launchd or Windows service. |
+| `diavlos service install` | Start the helper with your login: a systemd user unit, a launchd agent, or on Windows your own logon Run entry. Always as you, never as root or SYSTEM. |
 | `diavlos bridge slack --room ops --channel C0123` | Bridge a room to a Slack channel over Socket Mode. |
 | `diavlos bridge teams --room ops --link "<channel link>"` | Bridge to a Microsoft Teams channel. Signs in with a device code, then polls. No public URL. |
 | `diavlos bridge buzz --room ops --relay wss://… --channel <uuid>` | Bridge to a Buzz channel over its Nostr relay. Signed on both sides. |

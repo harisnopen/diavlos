@@ -282,6 +282,9 @@ pub fn new_id() -> String {
 }
 
 /// Now, as RFC 3339 in UTC with second precision.
+/// How far ahead of the home's clock a message's `ts` may be.
+pub const MAX_CLOCK_SKEW_SECS: i64 = 300;
+
 pub fn now_ts() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -376,6 +379,31 @@ impl Message {
         key.verify(&self.signing_bytes(), &self.sig)
     }
 
+    /// Check `ts` as the home sees it on arrival: the exact format the spec
+    /// asks for (RFC 3339 UTC, whole seconds, `Z`), which is what makes the
+    /// string comparisons in expiry and retention sound, and not more than
+    /// `MAX_CLOCK_SKEW_SECS` ahead of `now`, so a sender cannot date a
+    /// message into the future to dodge retention or stretch an approve.
+    /// A past `ts` is fine: a message can wait days in an outbox.
+    pub fn check_ts(&self, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        let t = chrono::DateTime::parse_from_rfc3339(&self.ts)
+            .map_err(|_| Error::Invalid(format!("ts {:?} is not RFC 3339", self.ts)))?
+            .with_timezone(&chrono::Utc);
+        if t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true) != self.ts {
+            return Err(Error::Invalid(format!(
+                "ts {:?} must be UTC, whole seconds, ending in Z",
+                self.ts
+            )));
+        }
+        if t > now + chrono::Duration::seconds(MAX_CLOCK_SKEW_SECS) {
+            return Err(Error::Invalid(format!(
+                "ts {} is in the future; check this computer's clock",
+                self.ts
+            )));
+        }
+        Ok(())
+    }
+
     /// The envelope: everything except the content, plus the content hash.
     /// This is what the chain is over.
     pub fn envelope(&self) -> Value {
@@ -465,6 +493,33 @@ mod tests {
         m.verify(&alice.public()).unwrap();
         let bob = Identity::generate("bob", Kind::Agent);
         assert!(m.verify(&bob.public()).is_err());
+    }
+
+    #[test]
+    fn ts_must_be_well_formed_and_not_in_the_future() {
+        let alice = Identity::generate("alice", Kind::Agent);
+        let mut m = Message::new(draft("ops", "alice", "hi"), &alice).unwrap();
+        let now = chrono::Utc::now();
+        m.check_ts(now).unwrap();
+        // Old is fine: it may have waited in an outbox.
+        m.ts = "2020-01-01T00:00:00Z".into();
+        m.check_ts(now).unwrap();
+        // A little clock skew is fine; far ahead is not.
+        let soon = now + chrono::Duration::seconds(60);
+        m.ts = soon.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        m.check_ts(now).unwrap();
+        m.ts = "2999-01-01T00:00:00Z".into();
+        assert!(m.check_ts(now).is_err());
+        // Anything but the one format would break string comparisons.
+        for bad in [
+            "2020-01-01T00:00:00+00:00",
+            "2020-01-01T00:00:00.5Z",
+            "2020-01-01 00:00:00Z",
+            "yesterday",
+        ] {
+            m.ts = bad.into();
+            assert!(m.check_ts(now).is_err(), "{bad}");
+        }
     }
 
     #[test]

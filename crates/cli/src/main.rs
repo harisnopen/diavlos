@@ -223,6 +223,10 @@ enum Cmd {
     /// Check a bundle. Works with no helper running. For auditors.
     Verify {
         bundle: PathBuf,
+        /// The owner key fingerprint you expect (from `diavlos who`). A
+        /// bundle signed by any other owner key fails.
+        #[arg(long)]
+        owner: Option<String>,
     },
     /// Legal hold. Retention stops deleting.
     Hold {
@@ -242,7 +246,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Run the helper as a systemd, launchd or Windows service.
+    /// Start the helper with your login (systemd, launchd, Windows logon).
     Service {
         #[command(subcommand)]
         action: ServiceCmd,
@@ -967,9 +971,17 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             eprintln!("exported {} messages", r.count);
             Ok(0)
         }
-        Cmd::Verify { bundle } => {
+        Cmd::Verify { bundle, owner } => {
             let text = std::fs::read_to_string(&bundle)?;
-            let report = diavlos_core::bundle::verify(&text)?;
+            let mut report = diavlos_core::bundle::verify(&text)?;
+            if let Some(want) = owner {
+                if !want.eq_ignore_ascii_case(&report.owner_fingerprint) {
+                    report.problems.push(format!(
+                        "owner key is {}, not the {} you expected",
+                        report.owner_fingerprint, want
+                    ));
+                }
+            }
             println!(
                 "room {} ({}), exported by {} at {}, {} messages (seq {}..{}), {} tombstones{}",
                 report.room,
@@ -986,8 +998,13 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                     ""
                 }
             );
+            println!("owner key {}", report.owner_fingerprint);
             if report.ok() {
                 println!("OK: every signature verifies and the chain is whole.");
+                println!(
+                    "That proves the bundle is whole, not whose it is: check the owner key \
+matches `diavlos who`, or pass --owner."
+                );
                 Ok(0)
             } else {
                 for p in &report.problems {

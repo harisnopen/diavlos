@@ -364,6 +364,7 @@ impl Helper {
             .member_by_name(&room.id, &msg.from)?
             .ok_or_else(|| Error::Denied(format!("unknown sender {}", msg.from)))?;
         msg.verify(&member.key)?;
+        msg.check_ts(chrono::Utc::now())?;
         if let Some(seen) = from_node {
             self.node_check(room, &member, seen).await?;
         }
@@ -435,8 +436,10 @@ impl Helper {
     pub(crate) fn check_typed(&self, room: &Room, msg: &Message) -> Result<()> {
         let target = match &msg.reply_to {
             Some(id) => match self.store.message_by_id(id)? {
-                Some(t) => Some(t),
-                None => return Err(Error::Invalid(format!("no message {id} in this room"))),
+                // Ids are global, so check the room: a claim or approve
+                // here must not reach a task or question in another room.
+                Some(t) if t.room == room.id => Some(t),
+                _ => return Err(Error::Invalid(format!("no message {id} in this room"))),
             },
             None => None,
         };
