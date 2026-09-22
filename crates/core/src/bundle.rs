@@ -136,6 +136,12 @@ pub struct Report {
     pub last_seq: u64,
     pub tombstones: u64,
     pub chain_from_genesis: bool,
+    /// Fingerprint of the owner key the bundle claims. A bundle only proves
+    /// it is whole and self-consistent; anyone can make a fresh key and a
+    /// room around it. Compare this with the fingerprint `diavlos who`
+    /// shows for the real owner, or pin it with `verify --owner`.
+    #[serde(default)]
+    pub owner_fingerprint: String,
     pub problems: Vec<String>,
 }
 
@@ -167,6 +173,7 @@ pub fn verify(text: &str) -> Result<Report> {
         count: header.count,
         first_seq: header.first_seq,
         last_seq: header.last_seq,
+        owner_fingerprint: header.room.owner.fingerprint(),
         ..Default::default()
     };
     let mut problems = Vec::new();
@@ -244,6 +251,14 @@ pub fn verify(text: &str) -> Result<Report> {
         }
         if m.tombstone {
             report.tombstones += 1;
+            // Erased means erased: the explicit content_hash would let
+            // edited text ride along unchecked.
+            if !m.text.is_empty() || m.action.is_some() || !m.data.is_null() {
+                problems.push(format!(
+                    "seq {} is a tombstone but still carries content",
+                    m.seq
+                ));
+            }
         } else if m.content().hash() != m.content_hash() {
             problems.push(format!("content of seq {} does not match its hash", m.seq));
         }
@@ -389,6 +404,32 @@ mod tests {
         let report = verify(&text).unwrap();
         assert!(report.ok(), "{:?}", report.problems);
         assert_eq!(report.tombstones, 1);
+    }
+
+    #[test]
+    fn a_tombstone_that_still_carries_text_is_caught() {
+        let (owner, _bob, room, members, mut msgs) = setup();
+        // The exporter signs the header, so a dishonest one can make the
+        // hashes line up. The tombstone itself must still be empty.
+        msgs[2] = msgs[2].tombstone();
+        msgs[2].text = "something else".into();
+        let text = export(&room, &members, &msgs, "haris", &owner, None).unwrap();
+        let r = verify(&text).unwrap();
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.contains("still carries content")),
+            "{:?}",
+            r.problems
+        );
+    }
+
+    #[test]
+    fn the_report_names_the_owner_key() {
+        let (owner, _bob, room, members, msgs) = setup();
+        let text = export(&room, &members, &msgs, "haris", &owner, None).unwrap();
+        let r = verify(&text).unwrap();
+        assert_eq!(r.owner_fingerprint, owner.public().fingerprint());
     }
 
     #[test]

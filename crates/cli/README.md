@@ -194,7 +194,7 @@ Owner and ops:
 | `diavlos mute <room> <name> [--off]` / `diavlos revoke <room> <name>` | Silence one member, or cut their key for good. |
 | `diavlos policy <room>` | Edit the room's rule file. One rule for now: which verbs need a human approve. |
 | `diavlos export <room> --since 2026-01-01 > bundle.jsonl` | Signed audit bundle. |
-| `diavlos verify bundle.jsonl` | Check a bundle: every signature, the chain, membership. Works with no helper running. |
+| `diavlos verify bundle.jsonl [--owner <fingerprint>]` | Check a bundle: every signature, the chain, membership. Works with no helper running. Prints the owner key; pass `--owner` with the fingerprint from `diavlos who` to prove whose room it is. |
 | `diavlos hold <room> --on` | Legal hold. Retention stops deleting. |
 | `diavlos events --follow` | JSONL stream of everything the helper does. Feed it to Splunk. |
 | `diavlos doctor` | Checks config, network, keys, disk. Paste the output in a support ticket. |

@@ -358,6 +358,22 @@ fn export_verify_events_watch_hold_rotate() {
     std::fs::write(&path, &bundle).unwrap();
     let out = a.ok(&["verify", path.to_str().unwrap()]);
     assert!(out.contains("OK:"), "{out}");
+    // Pinning the owner key: the right one passes, any other fails.
+    let fp = out
+        .lines()
+        .find_map(|l| l.strip_prefix("owner key "))
+        .unwrap()
+        .to_string();
+    a.ok(&["verify", path.to_str().unwrap(), "--owner", &fp]);
+    assert_eq!(
+        a.code(&[
+            "verify",
+            path.to_str().unwrap(),
+            "--owner",
+            "0000000000000000"
+        ]),
+        1
+    );
     let bad = bundle.replace("found a bug", "rm -rf");
     let bad_path = a.dir.join("bad.jsonl");
     std::fs::write(&bad_path, bad).unwrap();
