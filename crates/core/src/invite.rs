@@ -107,9 +107,30 @@ impl Invite {
         }
         validate_name(&self.name)?;
         validate_name(&self.room_name)?;
-        self.owner
-            .verify(&self.signing_bytes(), &self.sig)
-            .map_err(|_| Error::Denied("invite signature does not match the owner key".into()))
+        // We sign with an unset for_node left out. Another implementation
+        // may have signed it as `"for_node": null`; accept that too, since
+        // both say the same thing.
+        let ok = self.owner.verify(&self.signing_bytes(), &self.sig).is_ok()
+            || (self.for_node.is_none()
+                && self
+                    .owner
+                    .verify(&self.signing_bytes_with_null_for_node(), &self.sig)
+                    .is_ok());
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Denied(
+                "invite signature does not match the owner key".into(),
+            ))
+        }
+    }
+
+    fn signing_bytes_with_null_for_node(&self) -> Vec<u8> {
+        let mut v = serde_json::to_value(self).expect("invite serializes");
+        let o = v.as_object_mut().expect("object");
+        o.remove("sig");
+        o.insert("for_node".into(), serde_json::Value::Null);
+        canonical_json(&v).into_bytes()
     }
 
     /// True if the invite is past its expiry at `now` (RFC 3339 UTC).
@@ -181,6 +202,18 @@ mod tests {
         let mut inv2 = Invite::create(spec(), &owner).unwrap();
         inv2.role = Role::Approver;
         assert!(inv2.verify().is_err());
+    }
+
+    #[test]
+    fn an_invite_signed_with_a_null_for_node_verifies() {
+        // As another implementation following the spec example might sign.
+        let owner = Identity::generate("haris", Kind::Human);
+        let mut inv = Invite::create(spec(), &owner).unwrap();
+        inv.sig = owner.sign(&inv.signing_bytes_with_null_for_node());
+        inv.verify().unwrap();
+        // It is still bound to everything else.
+        inv.role = Role::Approver;
+        assert!(inv.verify().is_err());
     }
 
     #[test]

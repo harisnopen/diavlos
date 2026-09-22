@@ -10,8 +10,43 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+### Security
+
+- `check-approve` checks the approver still has the approver role, and is
+  not revoked, muted or expired, when the approve is spent. It also skips
+  an approve dated in the future. An approve given before a downgrade
+  could still be spent after it.
+- An agent key can no longer approve or deny, even when it owns the room.
+- `reply_to` must name a message in the same room. A claim or approve
+  could reach a task or question in another room.
+- The home refuses a `ts` more than five minutes ahead of its clock, or in
+  any spelling but `YYYY-MM-DDTHH:MM:SSZ`. Rate limits count by when the
+  home stored a message, not by the sender's `ts`. Backdating used to get
+  past the limits, and future-dating escaped retention.
+- The Slack bridge escapes room text, so a member cannot ping `@channel`,
+  mention people, or disguise a link.
+- On Windows, `service install` starts the helper at logon as you, from
+  your own Run key, instead of as a LocalSystem service. `uninstall`
+  removes an older SYSTEM service too, or says how.
+
+### Added
+
+- `verify` prints the owner key's fingerprint, and `verify --owner
+  <fingerprint>` fails a bundle from any other owner. A bundle alone only
+  proves it is whole, not whose it is.
+
 ### Fixed
 
+- The web page shows the newest 500 messages of a room, not the oldest.
+- `verify` flags a tombstone that still carries content.
+- The systemd unit and launchd plist quote their paths, so a path with a
+  space works.
+- Invites signed with `"for_node": null`, as the spec example shows,
+  verify.
+- `docs/SPEC.md` now matches the code: `trace` is signed and chained, the
+  name rules, the `service` kind, which fields are omitted when absent,
+  approve fields, the approver check, delivery being at least once, and
+  what happens to unknown fields.
 - A read from a given `since` no longer moves your bookmark. The web page
   reads from seq 1 as you, so opening it used to mark every message read,
   and the agent then missed new ones or got old ones twice.
