@@ -2,6 +2,7 @@
 //! one-time login link; the link's token is swapped for a session cookie
 //! on first use and then dies.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMsg, WebSocket, WebSocketUpgrade};
@@ -146,24 +147,59 @@ async fn api_messages(
     if let Some(r) = guard(&app, &headers) {
         return r;
     }
-    let since = q
+    let since: Option<u64> = q
         .get("since")
         .and_then(|s| s.as_str())
         .and_then(|s| s.parse().ok());
-    match app
-        .client
-        .call(&Request::Read {
-            room,
+    let read = |since: u64, limit: u32| {
+        let req = Request::Read {
+            room: room.clone(),
             identity: app.identity.clone(),
-            since: Some(since.unwrap_or(1)),
-            limit: 500,
-        })
-        .await
-    {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => err_response(e),
+            since: Some(since),
+            limit,
+        };
+        let client = &app.client;
+        async move { client.call(&req).await }
+    };
+    // A given `since` is the live path: what came after the last one seen.
+    if let Some(since) = since {
+        return match read(since, TAIL as u32).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => err_response(e),
+        };
     }
+    // Opening a room shows the newest messages, not the oldest. Reads with
+    // a `since` never move the bookmark, so paging to the end is safe.
+    let mut tail: VecDeque<Value> = VecDeque::with_capacity(TAIL);
+    let mut next = 1;
+    loop {
+        let page = match read(next, READ_PAGE).await {
+            Ok(v) => v,
+            Err(e) => return err_response(e),
+        };
+        let msgs = page["messages"].as_array().cloned().unwrap_or_default();
+        let full = msgs.len() == READ_PAGE as usize;
+        match msgs.last().and_then(|m| m["seq"].as_u64()) {
+            Some(seq) => next = seq + 1,
+            None => break,
+        }
+        for m in msgs {
+            if tail.len() == TAIL {
+                tail.pop_front();
+            }
+            tail.push_back(m);
+        }
+        if !full {
+            break;
+        }
+    }
+    Json(json!({ "messages": Vec::from(tail) })).into_response()
 }
+
+/// How many messages the page shows when a room opens.
+const TAIL: usize = 500;
+/// How many to ask the helper for at a time while finding the end.
+const READ_PAGE: u32 = 1000;
 
 async fn api_send(
     State(app): State<Shared>,

@@ -120,7 +120,7 @@ async function open(name) {
   try {
     const who = await api(`/api/rooms/${room}/who`);
     $('#who').innerHTML = who.map(w => `<span class="${w.online ? 'online' : ''}" title="${esc(w.key)}">${esc(w.name)} · ${esc(w.kind)} · ${esc(w.role)} · ${esc(w.fingerprint)}</span>`).join('');
-    const r = await api(`/api/rooms/${room}/messages?since=1`);
+    const r = await api(`/api/rooms/${room}/messages`);
     for (const m of r.messages) render(m);
   } catch (e) { $('#err').textContent = e.message; }
 }
