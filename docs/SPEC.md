@@ -396,9 +396,11 @@ many bytes of a JSON object tagged with `t`.
 
 A member that cannot reach the home queues its messages on its own disk and
 submits them when the link comes back. Nothing is lost, and nothing is
-stored twice, because `id` is unique and `seq` is assigned once. Delivery
-is at least once: a submit whose answer was lost is sent again, so a
-reader must dedupe by `id`.
+stored twice, because `id` is unique and `seq` is assigned once. A submit
+whose answer was lost is sent again. The home answers a resubmit (same
+`id`, same `sig`) with the message it already stored and does nothing else
+a second time. The same `id` with a different `sig` or room is refused.
+Readers should still dedupe by `id`: delivery to them is at least once.
 
 ## 5. Audit bundles
 

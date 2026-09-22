@@ -364,6 +364,12 @@ impl Helper {
             .member_by_name(&room.id, &msg.from)?
             .ok_or_else(|| Error::Denied(format!("unknown sender {}", msg.from)))?;
         msg.verify(&member.key)?;
+        // A resubmit: the member's outbox sends again when our answer was
+        // lost. Hand back what we stored, and run none of the side effects
+        // (limits, control ops, events, pushes) a second time.
+        if let Some(stored) = self.already_sequenced(room, &msg)? {
+            return Ok(stored);
+        }
         msg.check_ts(chrono::Utc::now())?;
         if let Some(seen) = from_node {
             self.node_check(room, &member, seen).await?;
@@ -400,7 +406,12 @@ impl Helper {
         let alert = self
             .store
             .check_limits(&room.id, &msg.from, &self.config.limits)?;
-        self.store.sequence_and_append(&mut msg)?;
+        if !self.store.sequence_and_append(&mut msg)? {
+            // The same message raced in twice; the other copy won.
+            return self
+                .already_sequenced(room, &msg)?
+                .ok_or_else(|| Error::Invalid(format!("message {} vanished", msg.id)));
+        }
         self.store
             .touch_member(&room.id, &member.name, from_node, &now)?;
         info!(room = %room.id, seq = msg.seq, from = %msg.from, kind = %msg.kind, "sequenced");
@@ -428,6 +439,13 @@ impl Helper {
         self.push_to_members(room, vec![msg.clone()], from_node)
             .await;
         Ok(msg)
+    }
+
+    /// The stored copy of `msg`, if this exact signed message is already in
+    /// the room. The same id with a different signature or room is not a
+    /// resubmit but a clash, and is refused.
+    fn already_sequenced(&self, room: &Room, msg: &Message) -> Result<Option<Message>> {
+        resubmit_of(self.store.message_by_id(&msg.id)?, &room.id, msg)
     }
 
     /// The rules that come with a type: claims are first-come, releases
@@ -871,4 +889,59 @@ fn init_logging(paths: &Paths, level: &str) -> anyhow::Result<()> {
         .with_writer(std::sync::Mutex::new(file))
         .try_init();
     Ok(())
+}
+
+/// Given what is stored under `msg`'s id, is `msg` a resubmit of it?
+fn resubmit_of(stored: Option<Message>, room_id: &str, msg: &Message) -> Result<Option<Message>> {
+    match stored {
+        None => Ok(None),
+        Some(stored) if stored.room == room_id && stored.sig == msg.sig => Ok(Some(stored)),
+        Some(_) => Err(Error::Invalid(format!(
+            "message id {} is already taken",
+            msg.id
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod resubmit_tests {
+    use super::*;
+    use diavlos_core::keys::{Identity, Kind};
+    use diavlos_core::message::{Draft, GENESIS_PREV};
+
+    fn signed(room: &str, text: &str, who: &Identity) -> Message {
+        Message::new(
+            Draft {
+                room: room.into(),
+                from: "bob".into(),
+                text: text.into(),
+                kind: Some(MessageType::Chat),
+                ..Default::default()
+            },
+            who,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_resubmit_gets_the_stored_copy_back() {
+        let bob = Identity::generate("bob", Kind::Agent);
+        let msg = signed("r_1", "hi", &bob);
+        let mut stored = msg.clone();
+        stored.sequence(7, GENESIS_PREV);
+        assert!(resubmit_of(None, "r_1", &msg).unwrap().is_none());
+        let back = resubmit_of(Some(stored), "r_1", &msg).unwrap().unwrap();
+        assert_eq!(back.seq, 7);
+    }
+
+    #[test]
+    fn a_different_message_under_a_taken_id_is_refused() {
+        let bob = Identity::generate("bob", Kind::Agent);
+        let stored = signed("r_1", "hi", &bob);
+        let mut other = signed("r_1", "something else", &bob);
+        other.id = stored.id.clone();
+        assert!(resubmit_of(Some(stored.clone()), "r_1", &other).is_err());
+        // Same message, other room: also a clash.
+        assert!(resubmit_of(Some(stored.clone()), "r_2", &stored).is_err());
+    }
 }
