@@ -10,6 +10,8 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-09-22
+
 ### Added
 
 - Release archives now carry `LICENSE` and `THIRD-PARTY-LICENSES.txt`
@@ -71,5 +73,6 @@ bundle, plus a CycloneDX SBOM.
   services. `doctor` for support tickets, `/metrics` on localhost for
   Prometheus, zero telemetry.
 
-[Unreleased]: https://github.com/harisnopen/diavlos/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/harisnopen/diavlos/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/harisnopen/diavlos/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/harisnopen/diavlos/releases/tag/v1.0.0

@@ -1086,7 +1086,7 @@ checksum = "ab03c107fafeb3ee9f5925686dbb7a73bc76e3932abb0d2b365cb64b169cf04c"
 
 [[package]]
 name = "diavlos"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1124,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "diavlos-client"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "diavlos-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chacha20poly1305 0.11.0",
  "chrono",
