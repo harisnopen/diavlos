@@ -938,10 +938,20 @@ async fn check_approve(
         if exp.as_str() <= now.as_str() {
             continue;
         }
+        // SPEC 2.5 check 5: an approve dated in the future does not count.
+        if a.ts.as_str() > now.as_str() {
+            continue;
+        }
         let Some(m) = helper.store.member_by_name(&room.id, &a.from)? else {
             continue;
         };
-        if m.kind != Kind::Human || m.revoked {
+        // Checks 2 and 3, as they stand now rather than when it was sent:
+        // a human key that still holds the approver role (or owns the
+        // room), not revoked, muted or expired since.
+        if m.kind != Kind::Human
+            || m.check_may_send(MessageType::Approve, m.key == room.owner, &now)
+                .is_err()
+        {
             continue;
         }
         if a.verify(&m.key).is_err() {

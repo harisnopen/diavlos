@@ -227,6 +227,22 @@ fn claims_approvals_and_owner_controls() {
         6,
     );
 
+    // An approve counts only while its human still holds the role: one
+    // given before a downgrade cannot be spent after it.
+    let action2 = r#"{"verb":"deploy","target":"web","params":{}}"#;
+    let asking = b
+        .cmd(&["ask", "ops", "Web?", "--action", action2, "--timeout", "30"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let q = c.json(&["next", "ops", "--timeout", "10", "--json"]);
+    let qid2 = q["id"].as_str().unwrap();
+    c.ok(&["send", "ops", "--type", "approve", "--reply-to", qid2]);
+    assert!(asking.wait_with_output().unwrap().status.success());
+    a.ok(&["grant", "ops", "alice", "--role", "chat"]);
+    a.fails_with(&["check-approve", "ops", action2], 6);
+    a.ok(&["grant", "ops", "alice", "--role", "approver"]);
+
     // Deny: logged like a yes; the asker gets exit 6.
     let asking = b
         .cmd(&[

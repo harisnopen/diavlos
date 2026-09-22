@@ -436,8 +436,10 @@ impl Helper {
     pub(crate) fn check_typed(&self, room: &Room, msg: &Message) -> Result<()> {
         let target = match &msg.reply_to {
             Some(id) => match self.store.message_by_id(id)? {
-                Some(t) => Some(t),
-                None => return Err(Error::Invalid(format!("no message {id} in this room"))),
+                // Ids are global, so check the room: a claim or approve
+                // here must not reach a task or question in another room.
+                Some(t) if t.room == room.id => Some(t),
+                _ => return Err(Error::Invalid(format!("no message {id} in this room"))),
             },
             None => None,
         };
