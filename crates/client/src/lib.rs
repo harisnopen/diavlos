@@ -164,7 +164,8 @@ impl Room {
         Ok(serde_json::from_value(v)?)
     }
 
-    /// Read from your bookmark onward. Never deletes.
+    /// Read from your bookmark onward. Never deletes. With `since`, read
+    /// from that seq instead and leave the bookmark alone.
     pub async fn read(&self, since: Option<u64>, limit: u32) -> Result<Vec<Message>> {
         let v = self
             .client

@@ -10,6 +10,22 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- A read from a given `since` no longer moves your bookmark. The web page
+  reads from seq 1 as you, so opening it used to mark every message read,
+  and the agent then missed new ones or got old ones twice.
+- The Claude Code Stop hook answers with `decision` and `reason` at the top
+  level, the shape Claude Code reads for Stop. Before, the wake-up did
+  nothing.
+- The Stop hook no longer marks messages read on a turn it will not block.
+  They wait for the next stop instead of being lost.
+- The GitHub Action says `approved=true` only for a human-signed approve.
+  An ask with no `action` that got a plain reply ("no, don't deploy") used
+  to count as approved; its outcome is now `answered`.
+- `install.sh` and the Action stop when cosign rejects the download. Before,
+  a failed check still installed the binary.
+
 ## [1.0.1] — 2026-09-22
 
 ### Added

@@ -114,7 +114,7 @@ want to handle that yourself rather than failing the job.
 | Output | Meaning |
 |---|---|
 | `approved` | `true` only when a human approved. |
-| `outcome` | `sent`, `approved`, `denied`, `timeout` or `error`. |
+| `outcome` | `sent`, `approved`, `answered`, `denied`, `timeout` or `error`. `answered` is a reply that is not a human approve, from an ask with no `action`. |
 | `answer` | The answer text. |
 | `message` | The whole answer message as JSON. |
 
@@ -124,7 +124,7 @@ The action exits with the CLI's code, so a workflow can branch on it:
 
 | Code | Meaning |
 |---|---|
-| 0 | Sent, or approved. |
+| 0 | Sent, approved, or answered. Check `approved`, not the code, before doing anything risky. |
 | 2 | Not in the room. |
 | 3 | Reached nobody. The home helper is offline and nothing is cached. |
 | 4 | Timed out. Nobody answered. |

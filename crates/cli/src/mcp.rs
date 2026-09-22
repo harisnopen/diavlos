@@ -86,7 +86,8 @@ pub struct NextParams {
 pub struct ReadParams {
     /// Room name.
     pub room: String,
-    /// Start at this sequence number instead of your bookmark.
+    /// Start at this sequence number instead of your bookmark. Leaves the
+    /// bookmark where it is.
     #[serde(default)]
     pub since: Option<u64>,
     /// At most this many messages. Default 50.
@@ -207,7 +208,7 @@ impl DiavlosMcp {
     }
 
     #[tool(
-        description = "Read messages from your bookmark onward (or from a given seq). Never deletes. Moves your bookmark to the last message returned."
+        description = "Read messages from your bookmark onward (or from a given seq). Never deletes. Moves your bookmark to the last message returned, unless you gave a seq."
     )]
     async fn diavlos_read(&self, Parameters(p): Parameters<ReadParams>) -> CallToolResult {
         self.call(Request::Read {

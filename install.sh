@@ -33,12 +33,17 @@ echo "downloading $url"
 curl -fsSL "$url" -o "$tmp/diavlos.tar.gz"
 # Every release ships a sigstore bundle next to the archive. Check it when
 # cosign is installed.
+# A bad signature stops the install. (Inside an && list, set -e would not.)
 if command -v cosign >/dev/null 2>&1; then
-  curl -fsSL "${url}.sigstore.json" -o "$tmp/bundle.json" && \
-  cosign verify-blob --bundle "$tmp/bundle.json" \
-    --certificate-identity-regexp "https://github.com/${REPO}/" \
+  curl -fsSL "${url}.sigstore.json" -o "$tmp/bundle.json"
+  if ! cosign verify-blob --bundle "$tmp/bundle.json" \
+    --certificate-identity-regexp "^https://github.com/${REPO}/" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    "$tmp/diavlos.tar.gz" && echo "signature ok"
+    "$tmp/diavlos.tar.gz"; then
+    echo "signature check failed; not installing" >&2
+    exit 1
+  fi
+  echo "signature ok"
 fi
 tar -xzf "$tmp/diavlos.tar.gz" -C "$tmp"
 mkdir -p "$BIN_DIR"

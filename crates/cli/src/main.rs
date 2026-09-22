@@ -1142,6 +1142,11 @@ async fn hook_run(
         .get("stop_hook_active")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // A turn our own block started: we will not block again, so leave the
+    // messages unread and let the next stop pick them up.
+    if stop_hook_active {
+        return Ok(0);
+    }
 
     // Read from the bookmark without waiting. A hook must never hold up a
     // turn, so any failure here is silence, not an error.
