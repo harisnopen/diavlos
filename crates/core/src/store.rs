@@ -621,14 +621,27 @@ impl Store {
     /// Give a message the next place in the chain and store it. This is
     /// what the room's home helper does. Atomic: no two messages get the
     /// same seq.
-    pub fn sequence_and_append(&self, msg: &mut Message) -> Result<()> {
+    ///
+    /// Returns false, and leaves `msg` as it was, when a message with this
+    /// id is already stored: a resubmit, not a new message.
+    pub fn sequence_and_append(&self, msg: &mut Message) -> Result<bool> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT seq FROM messages WHERE id=?1",
+                params![msg.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            return Ok(false);
+        }
         let (last_seq, last_hash) = Self::chain_head_in(&tx, &msg.room)?;
         msg.sequence(last_seq + 1, &last_hash);
         self.append_in(&tx, msg)?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     fn row_to_message(&self, row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -1106,6 +1119,20 @@ mod tests {
         // Another sender is under the per-minute limit but the daily
         // budget is about to be hit: the alert fires on the third message.
         assert!(s.check_limits("r_test", "bob", &limits).unwrap());
+    }
+
+    #[test]
+    fn appending_the_same_message_twice_stores_it_once() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let mut a = msg(&owner, "1");
+        let mut again = a.clone();
+        assert!(s.sequence_and_append(&mut a).unwrap());
+        // The copy is refused and left untouched: no made-up seq or prev.
+        assert!(!s.sequence_and_append(&mut again).unwrap());
+        assert_eq!(again.seq, 0);
+        assert_eq!(s.message_count("r_test").unwrap(), 1);
     }
 
     #[test]

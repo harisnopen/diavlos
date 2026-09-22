@@ -37,6 +37,12 @@ imply a change to the wire.
 
 ### Fixed
 
+- A resubmit no longer runs anything twice. When a member's outbox sent a
+  message again because the home's answer was lost, the home counted it
+  against the rate limits again, re-applied control ops, fired events
+  twice, and answered with a made-up seq. A resent claim was refused
+  ("you already hold this task") and dropped as refused, though it had
+  been stored. The home now answers a resubmit with the stored message.
 - The web page shows the newest 500 messages of a room, not the oldest.
 - `verify` flags a tombstone that still carries content.
 - The systemd unit and launchd plist quote their paths, so a path with a
