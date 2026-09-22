@@ -21,7 +21,7 @@ jobs:
     name: third-party licences
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-about
@@ -38,7 +38,7 @@ jobs:
           echo "wrote $bytes bytes"
           [ "$bytes" -gt 50000 ] || { echo "suspiciously small; refusing"; exit 1; }
           grep -q "^End of third-party licences." THIRD-PARTY-LICENSES.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: licences
           path: THIRD-PARTY-LICENSES.txt
@@ -57,13 +57,13 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p diavlos --target ${{ matrix.target }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: licences
       - name: Package
@@ -91,7 +91,7 @@ jobs:
           for f in dist/*; do
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: dist/*
@@ -100,7 +100,7 @@ jobs:
     name: sbom
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-cyclonedx --locked
@@ -110,7 +110,7 @@ jobs:
           mkdir -p dist
           cp crates/cli/diavlos.cdx.json dist/diavlos-${GITHUB_REF_NAME}.cdx.json
           cosign sign-blob --yes --bundle dist/diavlos-${GITHUB_REF_NAME}.cdx.json.sigstore.json dist/diavlos-${GITHUB_REF_NAME}.cdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: dist/*
@@ -119,7 +119,7 @@ jobs:
     needs: [build, sbom, licenses]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -185,7 +185,7 @@ jobs:
           end
           RB
           echo "wrote dist/diavlos.rb"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
