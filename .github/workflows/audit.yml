@@ -1,0 +1,44 @@
+# Check the dependency tree against the RustSec advisory database.
+#
+# Separate from ci.yml and not on every push: a fresh `cargo install
+# cargo-audit` takes minutes, and the thing being checked is not the
+# commit but the advisory database, which changes on its own schedule.
+# A crate that was clean on Monday can have an advisory on Thursday
+# without anyone touching this repository, so this runs weekly as well
+# as whenever the dependency set moves.
+name: audit
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/Cargo.toml", "**/Cargo.lock", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["**/Cargo.toml", "**/Cargo.lock", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Keyed apart from the build caches: this job compiles a tool,
+          # not the workspace.
+          key: audit
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        # Plain `cargo audit` is already the behaviour we want: it exits
+        # non-zero on a vulnerability and zero on a warning, printing the
+        # warning either way. Warnings are usually an unmaintained
+        # transitive crate, where there is nothing to do and nothing to
+        # gain from a red tick people learn to ignore.
+        run: cargo audit

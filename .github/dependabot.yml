@@ -1,0 +1,32 @@
+# Keep dependencies current without drowning in pull requests.
+#
+# Grouped and weekly on purpose: a stream of one-crate bumps is noise a
+# maintainer stops reading, and a dependency nobody reads is how a bad
+# one gets in. `cargo audit` in audit.yml covers the urgent case.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+
+  # The actions in our own workflows. A compromised action is a supply
+  # chain problem, so these are worth keeping current too.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

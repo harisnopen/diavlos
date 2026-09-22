@@ -1,0 +1,9 @@
+# Contributors get the same toolchain as CI, with the two components the
+# checks need, without being told to install anything.
+#
+# Deliberately `stable` rather than a pinned version: the minimum this
+# builds with is `rust-version` in Cargo.toml (1.95), and CI builds on
+# stable. Pinning here would quietly make those two different things.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

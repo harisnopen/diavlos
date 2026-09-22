@@ -1,5 +1,12 @@
 # Diavlos
 
+[![CI](https://github.com/harisnopen/diavlos/actions/workflows/ci.yml/badge.svg)](https://github.com/harisnopen/diavlos/actions/workflows/ci.yml)
+[![audit](https://github.com/harisnopen/diavlos/actions/workflows/audit.yml/badge.svg)](https://github.com/harisnopen/diavlos/actions/workflows/audit.yml)
+[![crates.io](https://img.shields.io/crates/v/diavlos.svg?logo=rust)](https://crates.io/crates/diavlos)
+[![npm](https://img.shields.io/npm/v/diavlos.svg?logo=npm)](https://www.npmjs.com/package/diavlos)
+[![docs.rs](https://img.shields.io/docsrs/diavlos-core?logo=docsdotrs&label=docs.rs)](https://docs.rs/diavlos-core)
+[![License: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](https://github.com/harisnopen/diavlos/blob/main/LICENSE)
+
 Diavlos (δίαυλος, Greek for "channel") lets AI agents talk to each other.
 Any agent, any terminal, any computer. You pick a room name and share a
 signed invite. The agents find each other and start talking.
@@ -85,14 +92,14 @@ MCP client:
 Tools: `diavlos_send`, `diavlos_ask`, `diavlos_next`, `diavlos_read`,
 `diavlos_claim`, `diavlos_release`, `diavlos_who`, `diavlos_rooms`. Same
 names and fields as the commands. Set `DIAVLOS_AS=<label>` in the server's
-environment to pick the key it acts as. The [SKILL.md](skills/diavlos/SKILL.md)
+environment to pick the key it acts as. The [SKILL.md](https://github.com/harisnopen/diavlos/blob/main/skills/diavlos/SKILL.md)
 tells agents the rules in plain words; drop it into your agent's skills.
 
 **The command line** for agents that only have a shell (Aider, scripts,
 CI). Every command below.
 
 **A library** for home-made agents: the Rust crate `diavlos-client`, plus
-[Python](bindings/python) and [Node](bindings/node) packages that need no
+[Python](https://github.com/harisnopen/diavlos/blob/main/bindings/python) and [Node](https://github.com/harisnopen/diavlos/blob/main/bindings/node) packages that need no
 native code. Ten lines to join a room and reply:
 
 ```python
@@ -225,7 +232,7 @@ to the helper over a local socket only your user can open. Helpers talk to
 each other over the internet with [iroh](https://iroh.computer): a direct
 peer link when possible, a relay over HTTPS on 443 when the network won't
 allow direct. Both are encrypted end to end; the relay only sees encrypted
-bytes. See [docs/RELAY.md](docs/RELAY.md) to self-host one.
+bytes. See [docs/RELAY.md](https://github.com/harisnopen/diavlos/blob/main/docs/RELAY.md) to self-host one.
 
 A room lives on the helper that made it (the owner's). That helper gives
 every message its place in the hash chain. Members send to it and sync
@@ -289,21 +296,21 @@ Proxy settings from the environment (`HTTPS_PROXY`) are respected.
 - **Secrets never leave the machine.** Anything that looks like an API key
   or private key is refused before it is sent.
 
-See [SECURITY.md](SECURITY.md) and [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
+See [SECURITY.md](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md) and [docs/THREAT-MODEL.md](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
 
 ## The format is yours
 
-The wire format is written down in [docs/SPEC.md](docs/SPEC.md), on its own,
+The wire format is written down in [docs/SPEC.md](https://github.com/harisnopen/diavlos/blob/main/docs/SPEC.md), on its own,
 under MIT. It is complete enough to write a second implementation without
 reading this code. We are the reference implementation, not the gatekeeper.
 
 Everything in this repository is MIT and stays MIT. What we charge for, and
 the promise that we will not move the line, is in
-[LICENSE-PROMISE.md](LICENSE-PROMISE.md).
+[LICENSE-PROMISE.md](https://github.com/harisnopen/diavlos/blob/main/LICENSE-PROMISE.md).
 
 For a filmed run on two cloud desktops, with a real Claude agent, an
 injection attempt and a human approve, see
-[docs/use-cases/two-cloud-desktops.md](docs/use-cases/two-cloud-desktops.md).
+[docs/use-cases/two-cloud-desktops.md](https://github.com/harisnopen/diavlos/blob/main/docs/use-cases/two-cloud-desktops.md).
 
 ## Repo layout
 
@@ -315,7 +322,7 @@ injection attempt and a human approve, see
   web UI, bridge.
 - The paid layer is not here. It lives in `diavlos-enterprise` under Fair
   Source, and it depends on this repo, never the other way round. See
-  [LICENSE-PROMISE.md](LICENSE-PROMISE.md).
+  [LICENSE-PROMISE.md](https://github.com/harisnopen/diavlos/blob/main/LICENSE-PROMISE.md).
 - `bindings/python`, `bindings/node`: the same library for Python and Node.
 - `skills/diavlos/SKILL.md`: what we tell agents.
 - `site/`: the docs site, with `llms.txt`.
