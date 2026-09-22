@@ -246,7 +246,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Run the helper as a systemd, launchd or Windows service.
+    /// Start the helper with your login (systemd, launchd, Windows logon).
     Service {
         #[command(subcommand)]
         action: ServiceCmd,
