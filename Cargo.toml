@@ -31,7 +31,7 @@ rusqlite_migration = "2"
 clap = { version = "4", features = ["derive", "env"] }
 directories = "6"
 toml = "1"
-toml_edit = "0.24"
+toml_edit = "0.25"
 iroh = "1.2"
 interprocess = { version = "2", features = ["tokio"] }
 rmcp = { version = "3", features = ["server", "transport-io", "macros"] }
