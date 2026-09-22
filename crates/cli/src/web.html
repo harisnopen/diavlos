@@ -63,7 +63,17 @@ async function api(path, opts) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
-function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+// Escapes quotes as well as the tag characters, so the same function is
+// safe in an attribute as well as in element content. It was tag-only
+// before, which left `title="${esc(...)}"` on line 112 relying on the fact
+// that a key is ed25519: plus hex and so cannot contain a quote. True
+// today, written down nowhere, and one field added by someone in a hurry
+// away from an injection.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
 function render(m) {
   if (seen.has(m.id)) return; seen.add(m.id);
   const d = document.createElement('div');

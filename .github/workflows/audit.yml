@@ -1,19 +1,25 @@
 # Check the dependency tree against the RustSec advisory database.
 #
-# Separate from ci.yml and not on every push: a fresh `cargo install
-# cargo-audit` takes minutes, and the thing being checked is not the
-# commit but the advisory database, which changes on its own schedule.
-# A crate that was clean on Monday can have an advisory on Thursday
-# without anyone touching this repository, so this runs weekly as well
-# as whenever the dependency set moves.
+# Separate from ci.yml and not doing real work on every push: a fresh
+# `cargo install cargo-audit` takes minutes, and the thing being checked
+# is not the commit but the advisory database, which changes on its own
+# schedule. A crate that was clean on Monday can have an advisory on
+# Thursday without anyone touching this repository, so this runs weekly
+# as well as whenever the dependency set moves.
+#
+# The job itself runs on every pull request and decides inside whether
+# there is anything to audit. It used to be filtered by `paths:`, which
+# looked equivalent and was not: a workflow skipped by a path filter
+# reports no check at all, so a pull request touching no Cargo file left
+# the required `cargo audit` check waiting for a run that would never
+# start, and the pull request could not be merged. A job that always
+# starts and exits early reports the check either way.
 name: audit
 
 on:
   push:
     branches: [main]
-    paths: ["**/Cargo.toml", "**/Cargo.lock", ".github/workflows/audit.yml"]
   pull_request:
-    paths: ["**/Cargo.toml", "**/Cargo.lock", ".github/workflows/audit.yml"]
   schedule:
     - cron: "23 6 * * 1"
   workflow_dispatch:
@@ -23,24 +29,61 @@ permissions:
 
 jobs:
   audit:
+    # This name is what the branch ruleset requires. Renaming the job
+    # renames the check and blocks every pull request until the ruleset
+    # is updated to match.
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The early-exit check below diffs against the base commit, so
+          # the shallow default clone is not enough.
+          fetch-depth: 0
+
+      - name: Did the dependency set move?
+        id: deps
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE:-}" ]; then
+            echo "Not a pull request. Auditing."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$BASE" "$HEAD" \
+            | grep -Eq '(^|/)Cargo\.(toml|lock)$|^\.github/workflows/audit\.yml$'
+          then
+            echo "Cargo files changed. Auditing."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No dependency change in this pull request. Nothing to audit."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        if: steps.deps.outputs.run == 'true'
         with:
           toolchain: stable
+
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        if: steps.deps.outputs.run == 'true'
         with:
           # Keyed apart from the build caches: this job compiles a tool,
           # not the workspace.
           key: audit
+
       - name: Install cargo-audit
+        if: steps.deps.outputs.run == 'true'
         run: cargo install cargo-audit --locked
+
       - name: Audit
         # Plain `cargo audit` is already the behaviour we want: it exits
         # non-zero on a vulnerability and zero on a warning, printing the
         # warning either way. Warnings are usually an unmaintained
         # transitive crate, where there is nothing to do and nothing to
         # gain from a red tick people learn to ignore.
+        if: steps.deps.outputs.run == 'true'
         run: cargo audit
