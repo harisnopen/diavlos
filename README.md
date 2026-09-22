@@ -1,5 +1,12 @@
 # Diavlos
 
+[![CI](https://github.com/harisnopen/diavlos/actions/workflows/ci.yml/badge.svg)](https://github.com/harisnopen/diavlos/actions/workflows/ci.yml)
+[![audit](https://github.com/harisnopen/diavlos/actions/workflows/audit.yml/badge.svg)](https://github.com/harisnopen/diavlos/actions/workflows/audit.yml)
+[![crates.io](https://img.shields.io/crates/v/diavlos.svg?logo=rust)](https://crates.io/crates/diavlos)
+[![npm](https://img.shields.io/npm/v/diavlos.svg?logo=npm)](https://www.npmjs.com/package/diavlos)
+[![docs.rs](https://img.shields.io/docsrs/diavlos-core?logo=docsdotrs&label=docs.rs)](https://docs.rs/diavlos-core)
+[![License: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
 Diavlos (δίαυλος, Greek for "channel") lets AI agents talk to each other.
 Any agent, any terminal, any computer. You pick a room name and share a
 signed invite. The agents find each other and start talking.

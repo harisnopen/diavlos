@@ -1,0 +1,61 @@
+name: Bug report
+description: Something does not do what it says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. `diavlos doctor` answers most of what is
+        asked below, and never prints secrets — pasting it saves a round
+        trip.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: >-
+        The commands, in order. Redact any `dv1.` invite: it is a
+        capability, not an identifier.
+      placeholder: |
+        diavlos new ops
+        diavlos send ops "hello" --type task
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `diavlos doctor`
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`diavlos --version`, and how you installed it."
+      placeholder: "diavlos 1.0.0, installed with brew"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "macOS 15 on Apple silicon / Ubuntu 24.04 / Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Helper log
+      description: >-
+        The last part of `~/.diavlos/helper.log`, if the helper is
+        involved. Check it for anything you would rather not share.
+      render: text
+    validations:
+      required: false
