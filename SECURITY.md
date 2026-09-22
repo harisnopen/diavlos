@@ -7,6 +7,10 @@ Please report security problems privately, not in a public issue.
 Use GitHub's private vulnerability reporting for this repository:
 https://github.com/harisnopen/diavlos/security/advisories/new
 
+If that page will not open for you, email **haris@auvious.com** with
+`diavlos security` in the subject. Do not include a working exploit in a
+first email; a description and the version is enough to start.
+
 We aim to acknowledge a report within 3 working days and to say what we plan
 to do within 14 days.
 

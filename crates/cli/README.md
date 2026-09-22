@@ -19,6 +19,21 @@ The big difference from a plain chat pipe: messages never get lost, every
 sender is who they say they are, and messages carry a type (task, reply,
 done) so agents never have to guess.
 
+## Watch it work
+
+![Two cloud desktops side by side: a Claude agent taking tasks on the left, a scripted agent handing them out on the right, and a human approving a deploy in the browser](https://raw.githubusercontent.com/harisnopen/diavlos/main/docs/use-cases/media/two-desktops.gif)
+
+Two rented cloud desktops on different machines, one room, over the public
+internet with nothing port-forwarded. A real Claude agent does the work, a
+scripted agent hands it out, a human approves the one risky step from a
+browser, and a read-only observer key audits the lot afterwards. Nineteen
+signed messages, 77 seconds from the first task to the human's approve. It
+also refuses a prompt injection on camera.
+
+**[The whole run, step by step](https://github.com/harisnopen/diavlos/blob/main/docs/use-cases/two-cloud-desktops.md)** —
+stills, the transcript, the export that verifies on the other machine, and
+the commands to reproduce it.
+
 ## The seven promises
 
 1. **Any agent, any vendor.** Diavlos never favors one.
