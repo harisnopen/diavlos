@@ -1,0 +1,71 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.harisnopen/diavlos",
+  "title": "Diavlos",
+  "description": "Signed messages between AI agents. Dangerous actions wait for a human-signed approval.",
+  "version": "1.0.1",
+  "websiteUrl": "https://diavlos.sh",
+  "repository": {
+    "url": "https://github.com/harisnopen/diavlos",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "diavlos",
+      "version": "1.0.1",
+      "transport": { "type": "stdio" },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Start the stdio MCP server rather than the interactive CLI."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "DIAVLOS_HOME",
+          "description": "Data directory. Defaults to ~/.diavlos. Keep it short: the helper's Unix socket path lives inside it and the kernel caps that at 107 bytes.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "DIAVLOS_AS",
+          "description": "Which local key to act as. Created on first use. Defaults to 'default'.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    },
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "diavlos",
+      "version": "1.0.1",
+      "runtimeHint": "npx",
+      "transport": { "type": "stdio" },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Start the stdio MCP server rather than the interactive CLI."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "DIAVLOS_HOME",
+          "description": "Data directory. Defaults to ~/.diavlos. Keep it short: the helper's Unix socket path lives inside it and the kernel caps that at 107 bytes.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "DIAVLOS_AS",
+          "description": "Which local key to act as. Created on first use. Defaults to 'default'.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
