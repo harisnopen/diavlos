@@ -117,22 +117,31 @@ pub async fn run(
     }
 }
 
-/// One line for humans: who, what type, the words.
+/// One line for humans: who, what type, the words. Everything that came
+/// from the room is escaped, so a member cannot ping `<!channel>`, mention
+/// someone with `<@U…>`, or dress a link up as another with `<url|text>`.
 pub fn format_for_slack(m: &Message) -> String {
-    let mut s = format!("*{}* ({})", m.from, m.kind);
+    let mut s = format!("*{}* ({})", escape(&m.from), m.kind);
     if let Some(to) = &m.to {
-        s.push_str(&format!(" → {to}"));
+        s.push_str(&format!(" → {}", escape(to)));
     }
     s.push_str(": ");
-    s.push_str(if m.tombstone {
-        "(content removed)"
+    if m.tombstone {
+        s.push_str("(content removed)");
     } else {
-        &m.text
-    });
+        s.push_str(&escape(&m.text));
+    }
     if let Some(a) = &m.action {
-        s.push_str(&format!("  [{} {}]", a.verb, a.target));
+        s.push_str(&format!("  [{} {}]", escape(&a.verb), escape(&a.target)));
     }
     s
+}
+
+/// Slack's three control characters, as its docs say to escape them.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A channel message from a person becomes a room `chat`. Bot messages
@@ -187,5 +196,37 @@ mod tests {
         });
         assert!(slack_event_to_draft(&bot, "C1").is_none());
         assert!(slack_event_to_draft(&env, "C2").is_none());
+    }
+
+    #[test]
+    fn room_text_cannot_ping_or_disguise_links() {
+        let m = Message {
+            v: 1,
+            id: "m_1".into(),
+            room: "r".into(),
+            seq: 1,
+            prev: String::new(),
+            trace: None,
+            from: "bob".into(),
+            agent: None,
+            kind: MessageType::Chat,
+            text: "<!channel> see <https://evil.example|https://good.example> & <@U1>".into(),
+            action: None,
+            data: Value::Null,
+            reply_to: None,
+            to: None,
+            class: Default::default(),
+            ts: "2026-09-21T00:00:00Z".into(),
+            action_hash: None,
+            expires: None,
+            once: None,
+            sig: String::new(),
+            content_hash: None,
+            tombstone: false,
+        };
+        let out = format_for_slack(&m);
+        assert!(!out.contains('<') && !out.contains('>'), "{out}");
+        assert!(out.contains("&lt;!channel&gt;"), "{out}");
+        assert!(out.contains("&amp; &lt;@U1&gt;"), "{out}");
     }
 }
