@@ -3,8 +3,9 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/harisnopen/diavlos/security/advisories/new
     about: >-
-      Please do not open a public issue. Report it privately here; see
-      SECURITY.md for what to expect.
+      Please do not open a public issue. Report it privately here. If
+      the page does not open, SECURITY.md has an email address and says
+      what to expect.
   - name: How does this work?
     url: https://github.com/harisnopen/diavlos/blob/main/docs/SPEC.md
     about: The wire format, the chain, invites and the peer protocol.
