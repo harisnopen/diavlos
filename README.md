@@ -366,6 +366,8 @@ the promise that we will not move the line, is in
   Source, and it depends on this repo, never the other way round. See
   [LICENSE-PROMISE.md](LICENSE-PROMISE.md).
 - `bindings/python`, `bindings/node`: the same library for Python and Node.
+- `examples/`: LangGraph to CrewAI, a REST vs Diavlos benchmark, and two
+  E2B sandboxes behind a human gate. Each runs on one machine.
 - `skills/diavlos/SKILL.md`: what we tell agents. Agent Skills format, the
   six spec fields only, so it installs everywhere.
 - `.claude-plugin/`: the plugin and marketplace manifests, so Claude Code can
