@@ -109,6 +109,12 @@ The warning counts every agent key on the machine, in a room or not: a
 tool's key is made the first time the tool runs, often before it is let into
 any room.
 
+If you see it, revoke that member on the gate (`diavlos revoke ops <name>`)
+and invite the person again from a machine the agents cannot reach. The
+warning clears once the agents' machine hears of the revoke, usually within
+seconds. If the room's home is on the agents' machine, make a new room on
+the gate instead.
+
 ## What this gives you
 
 - An agent can ask, and cannot approve: no key on its machine can.
