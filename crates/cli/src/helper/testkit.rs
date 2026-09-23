@@ -333,3 +333,13 @@ pub async fn draft_as(
         )
         .unwrap()
 }
+
+/// Make `link` the member's link to the home of `room_id`, as the room task
+/// would once connected.
+pub async fn set_home_link(member: &Arc<Helper>, room_id: &str, link: Arc<dyn Link>) {
+    member
+        .home_links
+        .lock()
+        .await
+        .insert(room_id.to_string(), link);
+}

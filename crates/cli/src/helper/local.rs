@@ -361,9 +361,12 @@ async fn dispatch(helper: &Arc<Helper>, req: Request) -> Result<serde_json::Valu
             )
             .await?,
         )?,
-        Request::CheckApprove { room, action } => {
-            serde_json::to_value(check_approve(helper, &room, &action).await?)?
-        }
+        Request::CheckApprove {
+            room,
+            action,
+            identity,
+            op_id,
+        } => serde_json::to_value(check_approve(helper, &room, &identity, &action, op_id).await?)?,
         Request::Export {
             room,
             identity,
@@ -1337,57 +1340,181 @@ async fn control(helper: &Helper, room: &str, identity: &str, op: ControlOp) -> 
     send(helper, room, identity, draft).await
 }
 
-/// Exit 0 if a valid, unexpired, unused human approve exists for exactly
-/// this action. Spends it: one approve, one deed.
+/// Exit 0 only if the room's home records, for this operation, the spend
+/// of a valid, unexpired, unused human approve for exactly this action.
+/// The home is the authority: this helper's view only picks which approve
+/// to ask about, oldest first. Home out of reach: reached nobody (3), and
+/// nothing is spent.
+///
+/// Without an `op_id` one is made up and kept on disk until the check has
+/// an answer, so a retry after a crash asks for the same operation and gets
+/// the answer that was lost instead of a refusal.
 pub(super) async fn check_approve(
     helper: &Helper,
     room: &str,
+    identity: &str,
     action: &diavlos_core::Action,
+    op_id: Option<String>,
 ) -> Result<CheckApproveResult> {
     let room = helper.store.room(room)?;
+    let lm = local_member(helper, &room, identity)?;
+    let spender = lm.member.name.clone();
     let hash = action.hash();
-    let now = now_ts();
-    for a in helper.store.approvals_for(&room.id, &hash)? {
-        let Some(exp) = &a.expires else { continue };
-        if exp.as_str() <= now.as_str() {
-            continue;
+    let made_up = op_id.is_none();
+    let (op_id, retry) = match op_id {
+        // The caller names the operation: it may be a retry.
+        Some(op) => (op, true),
+        None => {
+            let fresh = format!("op_{:032x}", rand::random::<u128>());
+            let op = helper
+                .store
+                .pending_spend(&room.id, &hash, &spender, &fresh, &now_ts())?;
+            let retry = op != fresh;
+            (op, retry)
         }
-        // SPEC 2.5 check 5: an approve dated in the future does not count.
-        if a.ts.as_str() > now.as_str() {
+    };
+    // Only the home can say yes. Out of reach is "try again" (3), never a
+    // no from this helper's own, possibly stale, view.
+    if !helper.is_home(&room) {
+        let link = wait_for_home_link(helper, &room).await.ok_or_else(|| {
+            Error::ReachedNobody(format!(
+                "the home of {} is not reachable, so nothing was spent; try again when it is",
+                room.name
+            ))
+        })?;
+        // Catch up first, so an approve that just arrived at the home is seen.
+        let _ = super::peers::sync_from_home(helper, &room, &link).await;
+    }
+    let now = now_ts();
+    // A retry of an operation may be asking about an approve it already
+    // spent (the answer was lost): those are asked about too, after the
+    // unspent ones, and the home answers with the recorded spend or no.
+    for a in helper.store.approvals_for_action(&room.id, &hash, retry)? {
+        let Some(exp) = a.expires.clone() else {
+            continue;
+        };
+        if exp.as_str() <= now.as_str() || a.ts.as_str() > now.as_str() {
             continue;
         }
         let Some(m) = helper.store.member_by_name(&room.id, &a.from)? else {
             continue;
         };
-        // Checks 2 and 3, as they stand now rather than when it was sent:
-        // a human key that still holds the approver role (or owns the
-        // room), not revoked, muted or expired since.
         if m.kind != Kind::Human
             || m.check_may_send(MessageType::Approve, m.key == room.owner, &now)
                 .is_err()
+            || a.verify(&m.key).is_err()
         {
             continue;
         }
-        if a.verify(&m.key).is_err() {
-            continue;
+        match spend_at_home(helper, &room, identity, &spender, &a.id, &hash, &op_id).await? {
+            Some(record) => {
+                helper.store.approval_use(&a.id, &hash, &record.at)?;
+                if made_up {
+                    helper.store.pending_spend_done(&room.id, &hash, &spender)?;
+                }
+                helper.emit(
+                    "approve_used",
+                    Some(&room.id),
+                    serde_json::json!({"approve": a.id, "by": a.from, "action_hash": hash, "op": op_id, "spender": spender}),
+                );
+                return Ok(CheckApproveResult {
+                    approve_id: a.id.clone(),
+                    approved_by: a.from.clone(),
+                    action_hash: hash,
+                    expires: exp,
+                    op_id: record.op_id,
+                    spent_at: record.at,
+                    audit_seq: record.audit_seq,
+                });
+            }
+            // Spent before by another operation; this helper had not heard.
+            None => {
+                helper.store.approval_use(&a.id, &hash, &now)?;
+            }
         }
-        if helper.store.approval_use(&a.id, &hash, &now)? {
-            helper.emit(
-                "approve_used",
-                Some(&room.id),
-                serde_json::json!({"approve": a.id, "by": a.from, "action_hash": hash}),
-            );
-            return Ok(CheckApproveResult {
-                approve_id: a.id.clone(),
-                approved_by: a.from.clone(),
-                action_hash: hash,
-                expires: exp.clone(),
-            });
-        }
+    }
+    if made_up {
+        helper.store.pending_spend_done(&room.id, &hash, &spender)?;
     }
     Err(Error::Denied(
         "no valid, unexpired, unused human approve for exactly this action".into(),
     ))
+}
+
+/// The link to a room's home, waiting a moment for one to come up: a
+/// helper started for this very command links within a second or two.
+async fn wait_for_home_link(helper: &Helper, room: &Room) -> Option<Arc<dyn crate::net::Link>> {
+    let deadline = tokio::time::Instant::now() + SEND_WAIT;
+    loop {
+        if let Some(l) = helper.home_link(&room.id).await {
+            return Some(l);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Ask the room's home to record a spend. `None`: spent before by another
+/// operation.
+#[allow(clippy::too_many_arguments)]
+async fn spend_at_home(
+    helper: &Helper,
+    room: &Room,
+    identity: &str,
+    spender: &str,
+    approve_id: &str,
+    action_hash: &str,
+    op_id: &str,
+) -> Result<Option<diavlos_core::SpendRecord>> {
+    let node = helper.net.node_id();
+    if helper.is_home(room) {
+        return helper
+            .spend_here(room, approve_id, action_hash, op_id, spender, &node)
+            .await;
+    }
+    let link = wait_for_home_link(helper, room).await.ok_or_else(|| {
+        Error::ReachedNobody(format!(
+            "the home of {} is not reachable, so nothing was spent; try again when it is",
+            room.name
+        ))
+    })?;
+    let id = helper.identity(identity).await?;
+    let ts = now_ts();
+    let sig = diavlos_core::Signer::sign(
+        id.as_ref(),
+        &crate::net::spend_signing_bytes(
+            &room.id,
+            approve_id,
+            action_hash,
+            op_id,
+            spender,
+            &node,
+            &ts,
+        ),
+    );
+    let req = Wire::Spend {
+        room_id: room.id.clone(),
+        approve_id: approve_id.to_string(),
+        action_hash: action_hash.to_string(),
+        op_id: op_id.to_string(),
+        spender: spender.to_string(),
+        node,
+        ts,
+        sig,
+    };
+    match link.request(&req).await {
+        Ok(Wire::Spent { record }) => Ok(Some(record)),
+        Ok(Wire::AlreadySpent { .. }) => Ok(None),
+        Ok(Wire::Err { code, msg, .. }) => Err(Error::from_code(code, &msg)),
+        Ok(other) => Err(Error::Invalid(format!("unexpected {}", other.label()))),
+        Err(e) => Err(Error::ReachedNobody(format!(
+            "no answer from the room's home ({e}). The spend may or may not be recorded: run \
+             the check again, and the same operation gets the recorded answer. (A home running \
+             a diavlos older than 1.2 cannot record spends at all; it needs upgrading.)"
+        ))),
+    }
 }
 
 async fn export(
@@ -1690,6 +1817,328 @@ mod delivery_tests {
             kinds.contains(&"delivery_quarantined".to_string()),
             "{kinds:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod spend_tests {
+    use super::*;
+    use crate::helper::testkit::{
+        connect, helper, room_with, set_home_link, Fault, ScriptedLink, TempHome,
+    };
+    use crate::net::Link;
+
+    struct World {
+        dirs: Vec<TempHome>,
+        home: Arc<Helper>,
+        m1: Arc<Helper>,
+        m2: Arc<Helper>,
+        room_id: String,
+    }
+
+    fn action() -> diavlos_core::Action {
+        serde_json::from_value(serde_json::json!({
+            "verb": "deploy", "target": "api", "params": {"version": "1.2"}
+        }))
+        .unwrap()
+    }
+
+    /// A home whose owner is a human approver, and two member helpers with
+    /// an agent each (bot, bot2), linked and caught up.
+    async fn world() -> World {
+        let dirs = vec![TempHome::new("h"), TempHome::new("m1"), TempHome::new("m2")];
+        let home = helper("home", &dirs[0], None);
+        let m1 = helper("m1", &dirs[1], None);
+        let m2 = helper("m2", &dirs[2], None);
+        let r = room_with(
+            &home,
+            "ops",
+            &[(&m1, "bot", "bot", false), (&m2, "bot2", "bot2", false)],
+        )
+        .await;
+        for m in [&m1, &m2] {
+            let link = connect(&home, m).await;
+            set_home_link(m, &r.id, link).await;
+        }
+        World {
+            dirs,
+            home,
+            m1,
+            m2,
+            room_id: r.id,
+        }
+    }
+
+    /// The owner asks for the action and approves it. Returns the approve id.
+    async fn approved(w: &World) -> String {
+        let q = send(
+            &w.home,
+            "ops",
+            "default",
+            DraftWire {
+                text: "deploy?".into(),
+                kind: Some(MessageType::Question),
+                action: Some(action()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let a = send(
+            &w.home,
+            "ops",
+            "default",
+            DraftWire {
+                kind: Some(MessageType::Approve),
+                reply_to: Some(q.message.id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        a.message.id
+    }
+
+    fn audit_events(h: &Helper, room_id: &str, approve: &str) -> usize {
+        h.store
+            .messages_after(room_id, 0, 10_000)
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m.kind == MessageType::System
+                    && m.data["event"] == "approve_spent"
+                    && m.data["approve"] == approve
+            })
+            .count()
+    }
+
+    async fn link_with(w: &World, m: &Arc<Helper>, script: Vec<Fault>) {
+        let l = ScriptedLink::new(connect(&w.home, m).await, "spend");
+        for f in script {
+            l.then(f);
+        }
+        let l: Arc<dyn Link> = l;
+        set_home_link(m, &w.room_id, l).await;
+    }
+
+    #[tokio::test]
+    async fn an_answer_lost_after_the_spend_is_recorded_is_got_back_by_a_retry() {
+        let w = world().await;
+        let approve = approved(&w).await;
+        link_with(
+            &w,
+            &w.m1,
+            vec![Fault::FailAfter(Error::Io(std::io::Error::other("reset")))],
+        )
+        .await;
+        let lost = check_approve(&w.m1, "ops", "bot", &action(), None).await;
+        assert!(matches!(lost, Err(Error::ReachedNobody(_))), "{lost:?}");
+        let recorded = w.home.store.spend_of(&approve).unwrap().unwrap();
+        // The retry reuses the operation id it kept on disk.
+        let got = check_approve(&w.m1, "ops", "bot", &action(), None)
+            .await
+            .unwrap();
+        assert_eq!(got.approve_id, approve);
+        assert_eq!(got.op_id, recorded.op_id);
+        assert_eq!(got.audit_seq, recorded.audit_seq);
+        assert_eq!(audit_events(&w.home, &w.room_id, &approve), 1);
+        // Done: the next check is a plain no.
+        assert!(matches!(
+            check_approve(&w.m1, "ops", "bot", &action(), None).await,
+            Err(Error::Denied(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_approve_one_operation() {
+        let w = world().await;
+        let approve = approved(&w).await;
+        let first = check_approve(&w.m1, "ops", "bot", &action(), Some("deploy-17".into()))
+            .await
+            .unwrap();
+        assert_eq!(first.op_id, "deploy-17");
+        // The same operation again: the recorded answer, not a second spend.
+        let again = check_approve(&w.m1, "ops", "bot", &action(), Some("deploy-17".into()))
+            .await
+            .unwrap();
+        assert_eq!(again.audit_seq, first.audit_seq);
+        // Another operation: no.
+        assert!(matches!(
+            check_approve(&w.m2, "ops", "bot2", &action(), Some("deploy-18".into())).await,
+            Err(Error::Denied(_))
+        ));
+        assert_eq!(audit_events(&w.home, &w.room_id, &approve), 1);
+    }
+
+    #[tokio::test]
+    async fn two_members_at_once_exactly_one_spends_it() {
+        let w = world().await;
+        let approve = approved(&w).await;
+        let a = action();
+        let (r1, r2) = tokio::join!(
+            check_approve(&w.m1, "ops", "bot", &a, None),
+            check_approve(&w.m2, "ops", "bot2", &a, None)
+        );
+        assert_eq!(r1.is_ok() as u8 + r2.is_ok() as u8, 1, "{r1:?} {r2:?}");
+        assert_eq!(audit_events(&w.home, &w.room_id, &approve), 1);
+    }
+
+    #[tokio::test]
+    async fn a_revoke_and_a_spend_never_both_land() {
+        let w = world().await;
+        approved(&w).await;
+        let a = action();
+        let (spent, _) = tokio::join!(
+            check_approve(&w.m1, "ops", "bot", &a, None),
+            control_for_test(
+                &w.home,
+                "ops",
+                "default",
+                ControlOp::Revoke { name: "bot".into() }
+            )
+        );
+        let log = w.home.store.messages_after(&w.room_id, 0, 10_000).unwrap();
+        let revoke_seq = log
+            .iter()
+            .find(|m| m.kind == MessageType::Control && m.data["op"] == "revoke")
+            .unwrap()
+            .seq;
+        match spent {
+            Ok(r) => assert!(r.audit_seq < revoke_seq, "spent after the revoke"),
+            Err(e) => assert!(matches!(e, Error::Denied(_)), "{e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_home_decides_on_what_it_knows_now_not_what_a_member_last_heard() {
+        let w = world().await;
+        let approve = approved(&w).await;
+        let room = w.m1.store.room("ops").unwrap();
+        let hash = action().hash();
+        // The spender is revoked at the home. The member has not heard, and
+        // asks straight away without catching up.
+        control_for_test(
+            &w.home,
+            "ops",
+            "default",
+            ControlOp::Revoke { name: "bot".into() },
+        )
+        .await;
+        assert!(
+            !w.m1
+                .store
+                .member_by_name(&room.id, "bot")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        let asked = spend_at_home(&w.m1, &room, "bot", "bot", &approve, &hash, "op-1").await;
+        assert!(matches!(asked, Err(Error::Denied(_))), "{asked:?}");
+        assert!(w.home.store.spend_of(&approve).unwrap().is_none());
+
+        // The same for an approver who lost the role since approving.
+        let w = world().await;
+        let alice = super::invite(&w.home, "ops", "alice", true, None, None, "default")
+            .await
+            .unwrap();
+        join(&w.home, &alice.invite, "alice").await.unwrap();
+        let q = send(
+            &w.home,
+            "ops",
+            "default",
+            DraftWire {
+                text: "deploy?".into(),
+                kind: Some(MessageType::Question),
+                action: Some(action()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let a = send(
+            &w.home,
+            "ops",
+            "alice",
+            DraftWire {
+                kind: Some(MessageType::Approve),
+                reply_to: Some(q.message.id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let room = w.m1.store.room("ops").unwrap();
+        let link = connect(&w.home, &w.m1).await;
+        crate::helper::peers::sync_from_home(&w.m1, &room, &link)
+            .await
+            .unwrap();
+        control_for_test(
+            &w.home,
+            "ops",
+            "default",
+            ControlOp::Grant {
+                name: "alice".into(),
+                role: diavlos_core::Role::Chat,
+                until: None,
+            },
+        )
+        .await;
+        let asked = spend_at_home(&w.m1, &room, "bot", "bot", &a.message.id, &hash, "op-2").await;
+        assert!(matches!(asked, Err(Error::Denied(_))), "{asked:?}");
+        assert!(w.home.store.spend_of(&a.message.id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_paused_room_spends_nothing() {
+        let w = world().await;
+        let approve = approved(&w).await;
+        control_for_test(&w.home, "ops", "default", ControlOp::Pause).await;
+        let room = w.m1.store.room("ops").unwrap();
+        let asked = spend_at_home(
+            &w.m1,
+            &room,
+            "bot",
+            "bot",
+            &approve,
+            &action().hash(),
+            "op-1",
+        )
+        .await;
+        assert!(matches!(asked, Err(Error::RoomPaused(_))), "{asked:?}");
+        assert!(w.home.store.spend_of(&approve).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn with_the_home_out_of_reach_it_is_reached_nobody_and_nothing_is_spent() {
+        let w = world().await;
+        let approve = approved(&w).await;
+        w.m1.home_links.lock().await.clear();
+        let asked = check_approve(&w.m1, "ops", "bot", &action(), None).await;
+        match asked {
+            Err(e) => assert_eq!(e.code(), 3, "{e}"),
+            Ok(r) => panic!("spent with no home: {r:?}"),
+        }
+        assert!(w.home.store.spend_of(&approve).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_home_restart_between_recording_and_answering_loses_nothing() {
+        let w = world().await;
+        let approve = approved(&w).await;
+        w.home.faults.arm("spend.after_commit");
+        assert!(check_approve(&w.m1, "ops", "bot", &action(), None)
+            .await
+            .is_err());
+        let recorded = w.home.store.spend_of(&approve).unwrap().unwrap();
+        // The home comes back on the same files.
+        let home = helper("home", &w.dirs[0], None);
+        let link = connect(&home, &w.m1).await;
+        set_home_link(&w.m1, &w.room_id, link).await;
+        let got = check_approve(&w.m1, "ops", "bot", &action(), None)
+            .await
+            .unwrap();
+        assert_eq!(got.op_id, recorded.op_id);
+        assert_eq!(audit_events(&home, &w.room_id, &approve), 1);
     }
 }
 

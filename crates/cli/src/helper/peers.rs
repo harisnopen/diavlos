@@ -11,7 +11,7 @@ use tracing::{debug, info};
 
 use super::outbox::flush_outbox;
 use super::Helper;
-use crate::net::{sync_signing_bytes, Link, Wire, SYNC_BATCH};
+use crate::net::{spend_signing_bytes, sync_signing_bytes, Link, Wire, SYNC_BATCH};
 
 /// Take every link other helpers open to us.
 pub async fn accept_loop(helper: Arc<Helper>) {
@@ -145,6 +145,63 @@ async fn handle(helper: &Arc<Helper>, link: &Arc<dyn Link>, req: Wire) -> Result
                 Ok(seq) => Ok(Wire::Ack { seq }),
                 Err(Error::Invalid(_)) => Ok(Wire::NeedSync { room_id: room.id }),
                 Err(e) => Err(e),
+            }
+        }
+        Wire::Spend {
+            room_id,
+            approve_id,
+            action_hash,
+            op_id,
+            spender,
+            node,
+            ts,
+            sig,
+        } => {
+            let room = helper
+                .store
+                .room_by_id(&room_id)?
+                .ok_or(Error::NotInRoom(room_id))?;
+            if !helper.is_home(&room) {
+                return Err(Error::Denied("not the home of that room".into()));
+            }
+            let member = helper
+                .store
+                .member_by_name(&room.id, &spender)?
+                .ok_or_else(|| Error::Denied(format!("{spender} is not a member")))?;
+            member.key.verify(
+                &spend_signing_bytes(
+                    &room.id,
+                    &approve_id,
+                    &action_hash,
+                    &op_id,
+                    &spender,
+                    &node,
+                    &ts,
+                ),
+                &sig,
+            )?;
+            // The node it says it acts from is the one asking.
+            if node != link.remote_node() {
+                return Err(Error::Denied(
+                    "a spend is asked for from the node that acts".into(),
+                ));
+            }
+            let age = chrono::DateTime::parse_from_rfc3339(&ts)
+                .map(|t| {
+                    (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .abs()
+                })
+                .unwrap_or(i64::MAX);
+            if age > 300 {
+                return Err(Error::Denied("spend request is too old".into()));
+            }
+            match helper
+                .spend_here(&room, &approve_id, &action_hash, &op_id, &spender, &node)
+                .await?
+            {
+                Some(record) => Ok(Wire::Spent { record }),
+                None => Ok(Wire::AlreadySpent { approve_id }),
             }
         }
         Wire::Hello { .. } => Ok(Wire::HelloOk {

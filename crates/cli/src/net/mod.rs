@@ -84,6 +84,29 @@ pub enum Wire {
     NeedSync {
         room_id: String,
     },
+    /// A member is about to act on an approve and asks the room's home to
+    /// record the spend. Signed by the member's key over every field (see
+    /// [`spend_signing_bytes`]), so the binding to this room, approve,
+    /// action, operation and node cannot be swapped.
+    Spend {
+        room_id: String,
+        approve_id: String,
+        action_hash: String,
+        /// Unique per operation; the same on every retry of it.
+        op_id: String,
+        spender: String,
+        node: String,
+        ts: String,
+        sig: String,
+    },
+    /// The spend is recorded (now, or before for this same operation).
+    Spent {
+        record: diavlos_core::SpendRecord,
+    },
+    /// That approve was spent before, by another operation.
+    AlreadySpent {
+        approve_id: String,
+    },
     /// A refusal or failure. `fate` says whether the sender should keep
     /// the message and try again (temporary) or stop (definitive); an old
     /// helper leaves it out, and the sender then goes by `code`.
@@ -140,6 +163,9 @@ impl Wire {
             Wire::Push { .. } => "push",
             Wire::Ack { .. } => "ack",
             Wire::NeedSync { .. } => "need_sync",
+            Wire::Spend { .. } => "spend",
+            Wire::Spent { .. } => "spent",
+            Wire::AlreadySpent { .. } => "already_spent",
             Wire::Err { .. } => "err",
         }
     }
@@ -191,6 +217,24 @@ pub fn sync_signing_bytes(
 ) -> Vec<u8> {
     diavlos_core::canonical::canonical_json(&serde_json::json!({
         "sync": 1, "room_id": room_id, "name": name, "have_seq": have_seq, "ts": ts, "node": node,
+    }))
+    .into_bytes()
+}
+
+/// The bytes a member signs on a `Spend`.
+#[allow(clippy::too_many_arguments)]
+pub fn spend_signing_bytes(
+    room_id: &str,
+    approve_id: &str,
+    action_hash: &str,
+    op_id: &str,
+    spender: &str,
+    node: &str,
+    ts: &str,
+) -> Vec<u8> {
+    diavlos_core::canonical::canonical_json(&serde_json::json!({
+        "spend": 1, "room_id": room_id, "approve_id": approve_id, "action_hash": action_hash,
+        "op_id": op_id, "spender": spender, "node": node, "ts": ts,
     }))
     .into_bytes()
 }

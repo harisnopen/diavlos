@@ -226,10 +226,17 @@ enum Cmd {
         reason: String,
     },
     /// Exit 0 if a valid, unexpired, unused human approve exists for
-    /// exactly this action. For deploy scripts to call before they act.
+    /// exactly this action and the room's home records its spend. For
+    /// deploy scripts to call before they act. Exit 6: no; exit 3: the
+    /// home is out of reach, nothing spent, try again.
     CheckApprove {
         room: String,
         action_json: String,
+        /// Your id for this operation, the same on every retry of it: a
+        /// retry then gets the recorded answer, not a refusal. Deduplicate
+        /// on it where you act.
+        #[arg(long = "op", value_name = "ID")]
+        op_id: Option<String>,
     },
     /// Kill switch. Nothing moves until resume.
     Pause {
@@ -1103,14 +1110,25 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             println!("denied ({})", r.message.id);
             Ok(0)
         }
-        Cmd::CheckApprove { room, action_json } => {
+        Cmd::CheckApprove {
+            room,
+            action_json,
+            op_id,
+        } => {
             let action: diavlos_core::Action = serde_json::from_str(&action_json)
                 .map_err(|e| Error::Invalid(format!("action is not valid: {e}")))?;
-            let v = client.call(&Request::CheckApprove { room, action }).await?;
+            let v = client
+                .call(&Request::CheckApprove {
+                    room,
+                    action,
+                    identity,
+                    op_id,
+                })
+                .await?;
             let r: CheckApproveResult = serde_json::from_value(v)?;
             println!(
-                "approved by {} ({}), valid until {}. Spent.",
-                r.approved_by, r.approve_id, r.expires
+                "approved by {} ({}), valid until {}. Spent for operation {} (audit seq {}).",
+                r.approved_by, r.approve_id, r.expires, r.op_id, r.audit_seq
             );
             Ok(0)
         }

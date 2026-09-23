@@ -166,10 +166,16 @@ pub enum Request {
         msg_id: String,
     },
     /// Exit 0 if a valid, unexpired, unused human approve exists for
-    /// exactly this action. Spends it.
+    /// exactly this action, and the room's home records its spend for this
+    /// operation. `identity` is the member acting; `op_id` names the
+    /// operation, the same on every retry of it (made up if not given).
     CheckApprove {
         room: String,
         action: diavlos_core::Action,
+        #[serde(default = "default_identity")]
+        identity: String,
+        #[serde(default)]
+        op_id: Option<String>,
     },
     Export {
         room: String,
@@ -339,6 +345,19 @@ pub struct CheckApproveResult {
     pub approved_by: String,
     pub action_hash: String,
     pub expires: String,
+    /// The operation the spend is recorded for. Deduplicate on it: a
+    /// spend is permission for one operation, not proof it ran once.
+    #[serde(default)]
+    pub op_id: String,
+    /// When the home recorded the spend, and where its audit event is.
+    #[serde(default)]
+    pub spent_at: String,
+    #[serde(default)]
+    pub audit_seq: u64,
+}
+
+fn default_identity() -> String {
+    "default".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

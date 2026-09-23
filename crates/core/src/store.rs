@@ -13,6 +13,7 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use rusqlite_migration::{Migrations, M};
 
+use crate::control::ControlOp;
 use crate::error::{Error, Result};
 use crate::faults::Faults;
 use crate::invite::Invite;
@@ -164,6 +165,31 @@ const MIGRATIONS: &[M<'static>] = &[
       attempt INTEGER NOT NULL DEFAULT 0,
       updated TEXT NOT NULL,
       PRIMARY KEY (room_id, reader, seq)
+    );
+    "#,
+    ),
+    // The room's home records each spend of an approve, once, with the
+    // audit event that says so. `pending_spends` is the member side: the
+    // operation id a check-approve is using, kept until it has an answer.
+    M::up(
+        r#"
+    CREATE TABLE spends (
+      approve_id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL,
+      action_hash TEXT NOT NULL,
+      op_id TEXT NOT NULL,
+      spender TEXT NOT NULL,
+      node TEXT NOT NULL,
+      at TEXT NOT NULL,
+      audit_seq INTEGER NOT NULL
+    );
+    CREATE TABLE pending_spends (
+      room_id TEXT NOT NULL,
+      action_hash TEXT NOT NULL,
+      spender TEXT NOT NULL,
+      op_id TEXT NOT NULL,
+      created TEXT NOT NULL,
+      PRIMARY KEY (room_id, action_hash, spender)
     );
     "#,
     ),
@@ -349,6 +375,48 @@ pub enum Settle {
     Renew { lease_until: String },
     /// Not now: hand it out again at this time.
     Nack { retry_at: String },
+}
+
+/// What a member asks the room's home for when it is about to act on an
+/// approve.
+#[derive(Debug, Clone)]
+pub struct SpendRequest {
+    pub room_id: String,
+    pub approve_id: String,
+    pub action_hash: String,
+    /// The caller's operation id. Stable across retries of one operation.
+    pub op_id: String,
+    /// The member name that asks, and will act.
+    pub spender: String,
+    /// The node it acts from.
+    pub node: String,
+    /// The home's clock.
+    pub now: String,
+}
+
+/// A spend the home recorded. At most one per approve, ever.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpendRecord {
+    pub approve_id: String,
+    pub room_id: String,
+    pub action_hash: String,
+    pub op_id: String,
+    pub spender: String,
+    pub node: String,
+    pub at: String,
+    /// Where the audit event sits in the chain.
+    pub audit_seq: u64,
+}
+
+/// How a spend request ended at the home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpendOutcome {
+    /// Recorded now, with the audit event.
+    Spent(SpendRecord),
+    /// Recorded before for this same operation: the answer that was lost.
+    AlreadyYours(SpendRecord),
+    /// Spent before, by another operation.
+    SpentByAnother,
 }
 
 /// A message after the bookmark and where it stands for one reader: seq,
@@ -969,6 +1037,281 @@ impl Store {
         Ok(true)
     }
 
+    /// Sequence a control message and apply what it changes to members
+    /// and the room in the same transaction, so nothing the home decides
+    /// (a spend, say) can fall between the message and its effect.
+    pub fn sequence_and_append_control(&self, msg: &mut Message, op: &ControlOp) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT seq FROM messages WHERE id=?1",
+                params![msg.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            return Ok(false);
+        }
+        let (last_seq, last_hash) = Self::chain_head_in(&tx, &msg.room)?;
+        msg.sequence(last_seq + 1, &last_hash);
+        self.append_in(&tx, msg)?;
+        Self::apply_control_in(&tx, &msg.room, op)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn apply_control_in(conn: &Connection, room_id: &str, op: &ControlOp) -> Result<()> {
+        match op {
+            ControlOp::Grant { name, role, until } => {
+                conn.execute(
+                    "UPDATE members SET role=?3, expires_at=?4 WHERE room_id=?1 AND name=?2",
+                    params![room_id, name, role.as_str(), until],
+                )?;
+            }
+            ControlOp::Pause | ControlOp::Resume => {
+                conn.execute(
+                    "UPDATE rooms SET paused=?2 WHERE id=?1",
+                    params![room_id, matches!(op, ControlOp::Pause) as i32],
+                )?;
+            }
+            ControlOp::Mute { name } | ControlOp::Unmute { name } => {
+                conn.execute(
+                    "UPDATE members SET muted=?3 WHERE room_id=?1 AND name=?2",
+                    params![room_id, name, matches!(op, ControlOp::Mute { .. }) as i32],
+                )?;
+            }
+            ControlOp::Revoke { name } => {
+                conn.execute(
+                    "UPDATE members SET revoked=1, node=NULL WHERE room_id=?1 AND name=?2",
+                    params![room_id, name],
+                )?;
+            }
+            ControlOp::Hold { on } => {
+                conn.execute(
+                    "UPDATE rooms SET hold=?2 WHERE id=?1",
+                    params![room_id, *on as i32],
+                )?;
+            }
+            // The helper handles the rest of a rotation.
+            ControlOp::Rotated { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn row_to_spend(row: &Row<'_>) -> rusqlite::Result<SpendRecord> {
+        Ok(SpendRecord {
+            approve_id: row.get("approve_id")?,
+            room_id: row.get("room_id")?,
+            action_hash: row.get("action_hash")?,
+            op_id: row.get("op_id")?,
+            spender: row.get("spender")?,
+            node: row.get("node")?,
+            at: row.get("at")?,
+            audit_seq: row.get::<_, i64>("audit_seq")? as u64,
+        })
+    }
+
+    /// The room's home: spend an approve for one operation. Every check and
+    /// the record, with its audit event in the chain, happen in one
+    /// transaction against the home's own state, which is the authority:
+    ///
+    /// 1. A spend already recorded for this approve answers the request:
+    ///    the same operation by the same member gets the recorded result
+    ///    back (its answer was lost); any other gets `SpentByAnother`.
+    /// 2. The room is not paused or closed.
+    /// 3. The spender is a current member, not revoked, muted or expired,
+    ///    and not an observer.
+    /// 4. The approve is in this room's chain, for exactly this action, not
+    ///    dated in the future and not expired.
+    /// 5. The approver is, now, a human key with the approver role or the
+    ///    owner's, not revoked, muted or expired, and signed it.
+    ///
+    /// `audit` is the signed system message that records the spend; it is
+    /// sequenced here only if the spend is recorded now.
+    pub fn spend_approve(&self, req: &SpendRequest, audit: &mut Message) -> Result<SpendOutcome> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let prior = tx
+            .query_row(
+                "SELECT * FROM spends WHERE approve_id=?1",
+                params![req.approve_id],
+                Self::row_to_spend,
+            )
+            .optional()?;
+        if let Some(rec) = prior {
+            if rec.op_id == req.op_id && rec.spender == req.spender && rec.room_id == req.room_id {
+                return Ok(SpendOutcome::AlreadyYours(rec));
+            }
+            return Ok(SpendOutcome::SpentByAnother);
+        }
+        // Spent by a helper from before spends were recorded here.
+        let legacy: Option<String> = tx
+            .query_row(
+                "SELECT msg_id FROM approvals_used WHERE msg_id=?1",
+                params![req.approve_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if legacy.is_some() {
+            return Ok(SpendOutcome::SpentByAnother);
+        }
+        let room = tx
+            .query_row(
+                "SELECT * FROM rooms WHERE id=?1",
+                params![req.room_id],
+                Self::row_to_room,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotInRoom(req.room_id.clone()))?;
+        if room.closed {
+            return Err(Error::Denied(format!("room {} was rotated", room.name)));
+        }
+        if room.paused {
+            return Err(Error::RoomPaused(room.name));
+        }
+        let member = |name: &str| -> Result<Option<Member>> {
+            Ok(tx
+                .query_row(
+                    "SELECT * FROM members WHERE room_id=?1 AND name=?2",
+                    params![req.room_id, name],
+                    Self::row_to_member,
+                )
+                .optional()?)
+        };
+        let spender = member(&req.spender)?
+            .ok_or_else(|| Error::Denied(format!("{} is not a member", req.spender)))?;
+        if spender.revoked || spender.muted || spender.is_expired(&req.now) {
+            return Err(Error::Denied(format!(
+                "{} may not act on approves: revoked, muted or expired",
+                spender.name
+            )));
+        }
+        if spender.role == Role::Observer {
+            return Err(Error::Denied(format!(
+                "{} is an observer and may not act on approves",
+                spender.name
+            )));
+        }
+        let approve = tx
+            .query_row(
+                "SELECT m.envelope, c.body, c.deleted FROM messages m
+                 LEFT JOIN contents c ON c.msg_id = m.id WHERE m.id=?1 AND m.room_id=?2",
+                params![req.approve_id, req.room_id],
+                |r| self.row_to_message(r),
+            )
+            .optional()?
+            .ok_or_else(|| Error::Denied(format!("no approve {} in this room", req.approve_id)))?;
+        let invalid = |why: &str| Err(Error::Denied(format!("approve {}: {why}", approve.id)));
+        if approve.kind != MessageType::Approve {
+            return invalid("is not an approve");
+        }
+        if approve.action_hash.as_deref() != Some(req.action_hash.as_str()) {
+            return invalid("is for a different action");
+        }
+        match &approve.expires {
+            Some(exp) if exp.as_str() > req.now.as_str() => {}
+            _ => return invalid("has expired"),
+        }
+        if approve.ts.as_str() > req.now.as_str() {
+            return invalid("is dated in the future");
+        }
+        let approver = member(&approve.from)?
+            .ok_or_else(|| Error::Denied(format!("approver {} is not a member", approve.from)))?;
+        if approver.kind != Kind::Human {
+            return invalid("was not signed by a human key");
+        }
+        approver
+            .check_may_send(MessageType::Approve, approver.key == room.owner, &req.now)
+            .map_err(|e| Error::Denied(format!("approve {}: {e}", approve.id)))?;
+        approve.verify(&approver.key)?;
+
+        let (last_seq, last_hash) = Self::chain_head_in(&tx, &req.room_id)?;
+        audit.sequence(last_seq + 1, &last_hash);
+        self.append_in(&tx, audit)?;
+        tx.execute(
+            "INSERT INTO spends (approve_id, room_id, action_hash, op_id, spender, node, at, audit_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                req.approve_id,
+                req.room_id,
+                req.action_hash,
+                req.op_id,
+                req.spender,
+                req.node,
+                req.now,
+                audit.seq as i64
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO approvals_used (msg_id, action_hash, used_at) VALUES (?1, ?2, ?3)",
+            params![req.approve_id, req.action_hash, req.now],
+        )?;
+        self.faults.check("spend.commit")?;
+        tx.commit()?;
+        Ok(SpendOutcome::Spent(SpendRecord {
+            approve_id: req.approve_id.clone(),
+            room_id: req.room_id.clone(),
+            action_hash: req.action_hash.clone(),
+            op_id: req.op_id.clone(),
+            spender: req.spender.clone(),
+            node: req.node.clone(),
+            at: req.now.clone(),
+            audit_seq: audit.seq,
+        }))
+    }
+
+    /// The spend recorded for an approve, if any. Home side.
+    pub fn spend_of(&self, approve_id: &str) -> Result<Option<SpendRecord>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM spends WHERE approve_id=?1",
+                params![approve_id],
+                Self::row_to_spend,
+            )
+            .optional()?)
+    }
+
+    /// Member side: the operation id a check-approve is using for this
+    /// action. The one on disk if a check is already under way (a retry
+    /// after a crash), else `fresh`, written before it is used.
+    pub fn pending_spend(
+        &self,
+        room_id: &str,
+        action_hash: &str,
+        spender: &str,
+        fresh: &str,
+        now: &str,
+    ) -> Result<String> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO pending_spends (room_id, action_hash, spender, op_id, created)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![room_id, action_hash, spender, fresh, now],
+        )?;
+        Ok(conn.query_row(
+            "SELECT op_id FROM pending_spends WHERE room_id=?1 AND action_hash=?2 AND spender=?3",
+            params![room_id, action_hash, spender],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The check has its answer; forget its operation id.
+    pub fn pending_spend_done(
+        &self,
+        room_id: &str,
+        action_hash: &str,
+        spender: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM pending_spends WHERE room_id=?1 AND action_hash=?2 AND spender=?3",
+            params![room_id, action_hash, spender],
+        )?;
+        Ok(())
+    }
+
     fn row_to_message(&self, row: &Row<'_>) -> rusqlite::Result<Message> {
         let envelope: String = row.get("envelope")?;
         let body: Option<String> = row.get("body")?;
@@ -1062,18 +1405,32 @@ impl Store {
         Ok(holder)
     }
 
-    /// Approves in a room for exactly this action hash, in order.
+    /// Approves in a room for exactly this action hash, in order: the ones
+    /// not known to be spent, then (with `with_spent`) the spent ones.
     pub fn approvals_for(&self, room_id: &str, action_hash: &str) -> Result<Vec<Message>> {
+        self.approvals_for_action(room_id, action_hash, false)
+    }
+
+    pub fn approvals_for_action(
+        &self,
+        room_id: &str,
+        action_hash: &str,
+        with_spent: bool,
+    ) -> Result<Vec<Message>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT m.envelope, c.body, c.deleted FROM messages m
+            "SELECT m.envelope, c.body, c.deleted,
+                    m.id IN (SELECT msg_id FROM approvals_used) AS spent
+             FROM messages m
              LEFT JOIN contents c ON c.msg_id = m.id
              WHERE m.room_id=?1 AND m.type='approve'
                AND json_extract(m.envelope, '$.action_hash')=?2
-               AND m.id NOT IN (SELECT msg_id FROM approvals_used)
-             ORDER BY m.seq",
+               AND (?3 OR m.id NOT IN (SELECT msg_id FROM approvals_used))
+             ORDER BY spent, m.seq",
         )?;
-        let rows = stmt.query_map(params![room_id, action_hash], |r| self.row_to_message(r))?;
+        let rows = stmt.query_map(params![room_id, action_hash, with_spent], |r| {
+            self.row_to_message(r)
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -2620,5 +2977,101 @@ mod tests {
         let d = s.deliveries("r_test", Some("haris")).unwrap();
         assert_eq!(d[0].attempt, 2);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_spend_and_its_audit_event_land_together_or_not_at_all() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let bot = Identity::generate("bot", Kind::Agent);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let member = |name: &str, id: &Identity, kind: Kind, role: Role| Member {
+            room_id: "r_test".into(),
+            name: name.into(),
+            key: id.public(),
+            kind,
+            role,
+            node: None,
+            granted_by: owner.public(),
+            expires_at: None,
+            joined_at: T0.into(),
+            last_seen: None,
+            muted: false,
+            revoked: false,
+            profile: serde_json::Value::Null,
+        };
+        s.upsert_member(&member("haris", &owner, Kind::Human, Role::Approver), None)
+            .unwrap();
+        s.upsert_member(&member("bot", &bot, Kind::Agent, Role::TaskGiver), None)
+            .unwrap();
+        let action: crate::message::Action =
+            serde_json::from_value(serde_json::json!({"verb":"deploy","target":"api","params":{}}))
+                .unwrap();
+        let mut q = Message::new(
+            Draft {
+                room: "r_test".into(),
+                from: "bot".into(),
+                text: "deploy?".into(),
+                kind: Some(MessageType::Question),
+                action: Some(action.clone()),
+                ..Default::default()
+            },
+            &bot,
+        )
+        .unwrap();
+        s.sequence_and_append(&mut q).unwrap();
+        let mut a = Message::new(
+            Draft {
+                room: "r_test".into(),
+                from: "haris".into(),
+                text: "approved".into(),
+                kind: Some(MessageType::Approve),
+                reply_to: Some(q.id.clone()),
+                action_hash: Some(action.hash()),
+                expires: Some("2999-01-01T00:00:00Z".into()),
+                once: Some(true),
+                ..Default::default()
+            },
+            &owner,
+        )
+        .unwrap();
+        s.sequence_and_append(&mut a).unwrap();
+        let req = SpendRequest {
+            room_id: "r_test".into(),
+            approve_id: a.id.clone(),
+            action_hash: action.hash(),
+            op_id: "op-1".into(),
+            spender: "bot".into(),
+            node: "n1".into(),
+            now: crate::message::now_ts(),
+        };
+        let audit = || msg(&owner, "spent");
+        let before = s.message_count("r_test").unwrap();
+
+        // The write fails at commit: neither the spend nor its event stays.
+        s.faults.arm("spend.commit");
+        assert!(s.spend_approve(&req, &mut audit()).is_err());
+        assert!(s.spend_of(&a.id).unwrap().is_none());
+        assert_eq!(s.message_count("r_test").unwrap(), before);
+
+        // Then it works, once; the same operation gets the record back; any
+        // other is told it is spent.
+        let SpendOutcome::Spent(rec) = s.spend_approve(&req, &mut audit()).unwrap() else {
+            panic!("not spent")
+        };
+        assert_eq!(s.message_count("r_test").unwrap(), before + 1);
+        assert_eq!(
+            s.spend_approve(&req, &mut audit()).unwrap(),
+            SpendOutcome::AlreadyYours(rec.clone())
+        );
+        let other = SpendRequest {
+            op_id: "op-2".into(),
+            ..req.clone()
+        };
+        assert_eq!(
+            s.spend_approve(&other, &mut audit()).unwrap(),
+            SpendOutcome::SpentByAnother
+        );
+        assert_eq!(s.message_count("r_test").unwrap(), before + 1);
     }
 }

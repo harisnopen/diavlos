@@ -278,3 +278,90 @@ fn a_message_taken_and_not_acked_comes_back() {
     assert!(d.contains("nothing handed out"), "{d}");
     a.ok(&["stop"]);
 }
+
+#[test]
+fn an_approve_is_spent_once_at_the_home_whoever_asks() {
+    let a = Home::new("spend-a", "haris");
+    let b = Home::new("spend-b", "bobhost");
+    a.ok(&["new", "ops"]);
+    let inv = invite_token(&a.ok(&["invite", "ops", "bob"]));
+    b.ok(&["--as", "fixer", "join", &inv]);
+
+    let action = r#"{"verb":"deploy","target":"api","params":{"version":"2"}}"#;
+    let asking = std::process::Command::new(env!("CARGO_BIN_EXE_diavlos"))
+        .env("DIAVLOS_HOME", &b.dir)
+        .env("USER", b.user)
+        .args([
+            "--as",
+            "fixer",
+            "ask",
+            "ops",
+            "Deploy?",
+            "--action",
+            action,
+            "--timeout",
+            "30",
+        ])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let q = a.ok(&["next", "ops", "--timeout", "20", "--json"]);
+    let q: serde_json::Value = serde_json::from_str(q.trim()).unwrap();
+    a.ok(&[
+        "send",
+        "ops",
+        "--type",
+        "approve",
+        "--reply-to",
+        q["id"].as_str().unwrap(),
+    ]);
+    assert!(asking.wait_with_output().unwrap().status.success());
+
+    // The member that acts asks the home, which records the spend.
+    let out = b.ok(&[
+        "--as",
+        "fixer",
+        "check-approve",
+        "ops",
+        action,
+        "--op",
+        "run-1",
+    ]);
+    assert!(out.contains("Spent for operation run-1"), "{out}");
+    // The same operation again: the recorded answer, not a refusal.
+    let again = b.ok(&[
+        "--as",
+        "fixer",
+        "check-approve",
+        "ops",
+        action,
+        "--op",
+        "run-1",
+    ]);
+    assert_eq!(out, again);
+    // Any other operation, from any machine: no.
+    b.fails_with(
+        &[
+            "--as",
+            "fixer",
+            "check-approve",
+            "ops",
+            action,
+            "--op",
+            "run-2",
+        ],
+        6,
+    );
+    a.fails_with(&["check-approve", "ops", action], 6);
+    // The spend is in the chain for everyone to see.
+    let log = a.ok(&["read", "ops", "--since", "1", "--limit", "100", "--json"]);
+    assert!(
+        log.contains("approve_spent") && log.contains("run-1"),
+        "{log}"
+    );
+
+    // With the home gone, nothing can be spent: exit 3, try again.
+    a.ok(&["stop"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    b.fails_with(&["--as", "fixer", "check-approve", "ops", action], 3);
+}

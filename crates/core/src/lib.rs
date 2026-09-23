@@ -32,7 +32,8 @@ pub use message::{Action, AgentInfo, DataClass, Draft, Message, MessageType};
 pub use policy::{DefaultHook, Policy, PolicyHook};
 pub use room::{Member, Role, Room};
 pub use store::{
-    Delivery, DeliveryState, LocalMember, OutboxCounts, OutboxEntry, OutboxState, Settle, Store,
+    Delivery, DeliveryState, LocalMember, OutboxCounts, OutboxEntry, OutboxState, Settle,
+    SpendOutcome, SpendRecord, SpendRequest, Store,
 };
 
 /// Version of this crate, for the version handshake.
