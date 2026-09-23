@@ -339,9 +339,11 @@ Found in an outside review, confirmed against the code, and not fixed yet.
 Until they are, Diavlos is fit for coordination and review, not for
 approving production changes on its own.
 
-- **A queued message can still be dropped.** A message queued while the
-  room's home is offline is deleted if the home refuses it on reconnect, for
-  example over the rate limit. The sender was already told it was queued.
+- **A queued message can still be dropped.** A queued message is deleted
+  if the home refuses it when it is sent, for example over the rate limit,
+  or if the connection drops in the middle of sending it. If the home had
+  already stored it, it comes back on the next sync; if not, it is gone.
+  The sender was already told it was queued.
 - **Queued messages are not encrypted.** The inbox is encrypted at rest;
   messages waiting to be sent are not yet.
 - **"Works once" is per machine.** A spent approve is recorded by the helper

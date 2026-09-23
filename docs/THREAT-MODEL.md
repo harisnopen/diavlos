@@ -39,9 +39,10 @@ code (September 23, 2026).
 - **"Works once" is per helper.** Two machines holding the same approve can
   each spend it once, and a helper that has not yet heard of a revoke will
   still honour the revoked approver. Spending at the room's home is the fix.
-- **A queued message can be dropped.** One queued while the home was offline
-  is deleted if the home refuses it on reconnect, for example over the rate
-  limit, although the sender was told it was queued.
+- **A queued message can be dropped.** It is deleted if the home refuses
+  it when it is sent, for example over the rate limit, or if the link drops
+  mid-frame while it is being sent (a read or write error is not treated as
+  temporary), although the sender was told it was queued.
 - **Queued outbound messages are stored unencrypted**, although the inbox is
   encrypted by default.
 - **`next` moves the bookmark before the agent has the message.** An agent
