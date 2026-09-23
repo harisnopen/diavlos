@@ -3,7 +3,8 @@
 Status: the six design choices below come from walking a real two-agent
 setup end to end (September 20, 2026). The full scored list of 36 risks is
 still to be written into this file; the numbers here (R1, R4, ...) keep the
-ids from that review.
+ids from that review. Rows numbered E come from an outside review of the
+code (September 23, 2026).
 
 ## Three things to protect
 
@@ -19,13 +20,32 @@ ids from that review.
 |---|---|---|
 | R1 | An invite is pasted in the wrong place and used from another machine. | `invite --for <node-id>` pins an invite to one machine. A leaked invite is then useless anywhere else. |
 | R4 | A cloned VM or a copied `~/.diavlos` folder makes two "agent-b" with one key. | The helper refuses a second machine showing up with a key already online in the room, and tells the owner with a system message. |
-| R15 | The approve is checked where the ask happens, not where the action happens. | `diavlos check-approve <room> <action>`: a one-line gate a deploy script calls before it deploys. Exit 0 only for a valid, unexpired, unused human approve for exactly that action; it spends it. |
-| R18 | A hijacked agent pastes `.env` into the room. | Outbound secret scan, on by default: refuse to send anything that looks like an API key or private key. `secret_scan = false` turns it off. |
+| R15 | The approve is checked where the ask happens, not where the action happens. | `diavlos check-approve <room> <action>`: a one-line gate a deploy script calls before it deploys. Exit 0 only for a valid, unexpired, unused human approve for exactly that action; it spends it. The spend is recorded by the helper that runs the check, so run it on one machine per action (see *Still open*). |
+| R18 | A hijacked agent pastes `.env` into the room. | Outbound secret scan, on by default: refuse to send anything that looks like an API key, token or private key, in the text, data, action or trace. `secret_scan = false` turns it off. It catches accidents; a regex cannot stop an agent set on getting a secret out. |
+| E1 | An agent on the same machine signs an approve with the person's key. | Agents never run as a human key by default. `diavlos mcp` refuses one, checked by the key's kind, not its name. `mcp install` and `hook install` give each tool its own agent key, which starts in no rooms. `diavlos_send` will not send `approve`, `deny`, `control` or `system`. This fixes an unsafe default. It is not a boundary against an agent with a shell on the same OS account: see *Still open*. |
 | R19 | Two agents in a loop run up an API bill overnight. | Daily message budget per room and a per-sender rate limit, both on by default. Burst alert to the owner. |
 | R22 | `alice` and `aIice` both exist. | ASCII lowercase names only, and every name shows a short key fingerprint beside it in `who`. |
 
 ## Still open
 
+- **An agent with a shell on your OS account can act as you.** It can run
+  `diavlos` with your key or read the key file; the keychain protects the
+  key at rest, not the helper's willingness to sign with it. Opening the web
+  UI from another device does not help while the key stays on this machine.
+  Approvals that must hold against your own agents need the human key where
+  the agent cannot reach it, with signing that requires a person: another
+  device, or another OS user whose socket, keys and privileges the agent
+  cannot touch.
+- **"Works once" is per helper.** Two machines holding the same approve can
+  each spend it once, and a helper that has not yet heard of a revoke will
+  still honour the revoked approver. Spending at the room's home is the fix.
+- **A queued message can be dropped.** One queued while the home was offline
+  is deleted if the home refuses it on reconnect, for example over the rate
+  limit, although the sender was told it was queued.
+- **Queued outbound messages are stored unencrypted**, although the inbox is
+  encrypted by default.
+- **`next` moves the bookmark before the agent has the message.** An agent
+  that dies first will not be handed it again; it stays in the log.
 - The relay can't read messages but can see who talks to whom, when, and how
   much.
 - A stolen, unlocked laptop is you. Same as SSH keys. Rotate the room and

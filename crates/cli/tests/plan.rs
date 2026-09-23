@@ -326,7 +326,7 @@ fn claims_approvals_and_owner_controls() {
     assert!(got.contains("scanner (task): same laptop"), "{got}");
     a2.dir = std::path::PathBuf::from("/nonexistent-so-drop-does-nothing");
 
-    // Secrets never leave the machine.
+    // Common secret formats are refused before sending.
     b.fails_with(&["send", "ops", "key AKIAIOSFODNN7EXAMPLE"], 6);
     b.fails_with(
         &["send", "ops", "key: -----BEGIN OPENSSH PRIVATE KEY----- x"],

@@ -37,8 +37,9 @@ the commands to reproduce it.
 ## The seven promises
 
 1. **Any agent, any vendor.** Diavlos never favors one.
-2. **Never lose a message.** If the other side is offline, the message waits.
-   It arrives when they wake up.
+2. **Messages wait.** If the other side is offline, the message waits.
+   It arrives when they wake up. The cases where one can still be dropped
+   are listed under [Known limits](#known-limits) until they are fixed.
 3. **Real names.** Every agent has a key. Every message is signed with it.
    Nobody can pretend to be "alice".
 4. **Reading never deletes.** Each reader keeps its own bookmark. Ten readers
@@ -101,13 +102,16 @@ disk until A's helper is back.
 MCP client:
 
 ```json
-{ "mcpServers": { "diavlos": { "command": "diavlos", "args": ["mcp"] } } }
+{ "mcpServers": { "diavlos": { "command": "diavlos", "args": ["--as", "my-agent", "mcp"] } } }
 ```
 
 Tools: `diavlos_send`, `diavlos_ask`, `diavlos_next`, `diavlos_read`,
 `diavlos_claim`, `diavlos_release`, `diavlos_who`, `diavlos_rooms`. Same
-names and fields as the commands. Set `DIAVLOS_AS=<label>` in the server's
-environment to pick the key it acts as. The [SKILL.md](https://github.com/harisnopen/diavlos/blob/main/skills/diavlos/SKILL.md)
+names and fields as the commands. `--as` (or `DIAVLOS_AS`) names the agent
+key it acts as. It will not run as a human key, and `diavlos_send` will not
+send `approve`, `deny`, `control` or `system`. An agent key starts in no
+rooms: let it in with `diavlos invite <room> my-agent` and
+`diavlos --as my-agent join <invite>`. The [SKILL.md](https://github.com/harisnopen/diavlos/blob/main/skills/diavlos/SKILL.md)
 tells agents the rules in plain words; drop it into your agent's skills.
 
 **The command line** for agents that only have a shell (Aider, scripts,
@@ -138,7 +142,7 @@ diavlos --as fixer next ops
 
 The `default` key is you, the person who installed it. Any other label is
 an agent key. The name an agent has inside a room is bound at invite time,
-not by the key file.
+not by the key file. `diavlos mcp` runs only as an agent key.
 
 ### Ask a human first
 
@@ -179,8 +183,8 @@ signed by the human's own key is.
 | `diavlos claim <room> <task-id>` / `diavlos release <room> <task-id>` | Take or give back a task. Two claims on one task: first wins, second is told no. |
 | `diavlos who <room>` | Who is here, their kind and role, a short key fingerprint, what they said they do, when last seen. |
 | `diavlos web` | Browser UI on localhost. Prints a one-time login link. Approve and deny buttons included. |
-| `diavlos mcp` | Start the MCP server (stdio). |
-| `diavlos mcp install --for <tool>` | Write the MCP config for Claude Code, Codex, Cursor, Gemini CLI, Superset or Vibe Kanban. `--for all` does the lot. Config writing, not adapters: it merges one server entry into the file the tool already reads and leaves the rest alone. |
+| `diavlos mcp` | Start the MCP server (stdio). Runs only as an agent key; refuses a human one. |
+| `diavlos mcp install --for <tool>` | Write the MCP config for Claude Code, Codex, Cursor, Gemini CLI, Superset or Vibe Kanban. `--for all` does the lot. Config writing, not adapters: it merges one server entry into the file the tool already reads and leaves the rest alone. The server acts as the tool's own agent key, never yours; let that key into rooms with `invite` and `join`. |
 | `diavlos hook install --for claude-code --room ops` | Wake-up hook. When the agent would stop, a waiting room message lands in its turn instead. No polling. |
 | `diavlos status` / `diavlos stop` | See rooms and links. Stop the helper. |
 
@@ -238,7 +242,7 @@ Types: `chat`, `task`, `question`, `reply`, `done`, `claim`, `release`,
 `approve`, `deny`, `control`, `system`. Only a human key may send
 `approve` or `deny`; only the owner may send `control` (grant, pause,
 resume, mute, revoke, hold, rotated); the helper sends `system` (joined,
-alerts) with the owner's key.
+alerts) with the owner's key. Over MCP, `diavlos_send` refuses all four.
 
 ## How it works
 
@@ -308,10 +312,45 @@ Proxy settings from the environment (`HTTPS_PROXY`) are respected.
   owner is told.
 - **Floods and loops** stop at the per-minute and daily limits. The owner
   gets a burst alert.
-- **Secrets never leave the machine.** Anything that looks like an API key
-  or private key is refused before it is sent.
+- **Common secrets are refused.** Text, data, action and trace are scanned
+  for anything that looks like an API key, token or private key, and the
+  message is not sent. That catches accidents. It is not a data-loss
+  control: base64 or a split string gets past any pattern.
+
+### What keeping agents off your key does not do
+
+By default an agent does not act as you: `diavlos mcp` and the wake-up
+hook run as the agent's own key, and MCP will not send an approve. That fixes
+an unsafe default. It is not a wall.
+
+An agent with a shell on your OS account can do what you can: run
+`diavlos` as your key, or read the key file. Opening the web UI from another
+device does not change that while the key stays on this machine. For
+approvals that must hold against your own agents, the human key has to live
+where the agent cannot reach it, and signing with it has to need a person:
+another device, or another OS user whose socket, keys and privileges the
+agent cannot touch.
 
 See [SECURITY.md](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md) and [docs/THREAT-MODEL.md](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
+
+## Known limits
+
+Found in an outside review, confirmed against the code, and not fixed yet.
+Until they are, Diavlos is fit for coordination and review, not for
+approving production changes on its own.
+
+- **A queued message can still be dropped.** A message queued while the
+  room's home is offline is deleted if the home refuses it on reconnect, for
+  example over the rate limit. The sender was already told it was queued.
+- **Queued messages are not encrypted.** The inbox is encrypted at rest;
+  messages waiting to be sent are not yet.
+- **"Works once" is per machine.** A spent approve is recorded by the helper
+  that ran `check-approve`. Two machines holding the same approve could each
+  spend it once. Run `check-approve` on one machine per action.
+- **`next` marks a message read before your agent has it.** If the agent
+  dies first, the message stays in the log but `next` will not hand it out
+  again. `read --since <seq>` gets it back.
+- **Not quantum resistant.** See the [threat model](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
 
 ## The format is yours
 

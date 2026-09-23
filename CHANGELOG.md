@@ -10,6 +10,42 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+### Security
+
+- An agent can no longer sign an approve with the person's key. `mcp
+  install` used to write a config that ran as `default`, the installer's
+  human key, so an agent could answer its own question with an approve that
+  `check-approve` accepted. Found by an outside review and reproduced
+  before it was fixed. Now `diavlos mcp` refuses to run as a human key,
+  judged by the key's kind rather than its label, and `diavlos_send`
+  refuses `approve`, `deny`, `control` and `system`.
+- The secret scan covers an action's verb, target and params, and the
+  trace, as well as the text and data. A key in `action.params` used to be
+  signed and sent. It also catches a `"password": "..."` written as JSON.
+
+### Changed
+
+- **Breaking:** `mcp install` and `hook install` give each tool its own
+  agent key, named after the tool (`claude-code`, `codex`, ...), instead of
+  the installer's. Tools that write the same file share one key: Vibe Kanban
+  writes Claude Code's, and a project's `.mcp.json` serves both Claude Code
+  and Superset. An agent key starts in no rooms; let it in with `invite` and
+  `--as <key> join`. Nothing of the person's is copied to it. An existing
+  config that runs as `default` now stops with a message saying what to do.
+  After upgrading, run `diavlos stop` once so the helper restarts as the
+  new version; `diavlos mcp` says so if a helper from before is still
+  running.
+- The docs stop claiming more than the code does. "Secrets never leave the
+  machine" becomes what the scan is, a guard against accidents. "Never lose
+  a message" becomes "Messages wait", with the cases that can still drop one
+  listed under a new *Known limits*. The threat model says plainly that an
+  agent with a shell on the same OS account can act as the person, and that
+  keeping agents off the key by default is not a wall against that.
+
+### Added
+
+- `whoami` on the local protocol: a key's label, name, kind and fingerprint.
+
 ## [1.1.0] — 2026-09-23
 
 1.0.1 was prepared but never released; its changes ship here.

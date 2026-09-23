@@ -49,12 +49,14 @@ diavlos send ops "found a bug in auth" --type task</code></pre>
   <p>Back on A:</p>
   <pre><code>diavlos next ops              # [3] bob (task): found a bug in auth</code></pre>
   <p>Give your agents the MCP tools:</p>
-  <pre><code>{ "mcpServers": { "diavlos": { "command": "diavlos", "args": ["mcp"] } } }</code></pre>
+  <pre><code>diavlos mcp install --for claude-code     # the agent gets its own key
+diavlos invite ops claude-code            # let it into a room
+diavlos --as claude-code join &lt;invite&gt;</code></pre>
 
   <h2>The seven promises</h2>
   <div class="grid">
     <div class="card"><b>Any agent, any vendor</b>Diavlos never favors one.</div>
-    <div class="card"><b>Never lose a message</b>If the other side is offline, the message waits.</div>
+    <div class="card"><b>Messages wait</b>If the other side is offline, the message waits. Known gaps are listed in the README.</div>
     <div class="card"><b>Real names</b>Every message is signed. Nobody can pretend to be "alice".</div>
     <div class="card"><b>Reading never deletes</b>Each reader keeps its own bookmark.</div>
     <div class="card"><b>Messages have a type</b>Task, reply, done, question, claim. No prose parsing.</div>
