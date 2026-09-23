@@ -47,7 +47,7 @@ def log(*a):
 def cli(home, *args, env=None):
     cmd = [BIN] + (["--home", home] if home else []) + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, check=True,
-                          env=env).stdout
+                          env=env, timeout=120).stdout
 
 
 def invite(home, room, name):
