@@ -6,17 +6,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use diavlos_client::proto::{
-    AskResult, CheckApproveResult, DraftWire, ExportResult, HelloResult, InviteResult, JoinResult,
-    OutboxItem, ReadResult, Request, Response, RoomStatus, RotateResult, SendResult, StatusResult,
-    WhoEntry, WhoamiResult,
+    AskResult, CheckApproveResult, DeliveryInfo, DeliveryItem, DraftWire, ExportResult,
+    HelloResult, InviteResult, JoinResult, NextResult, OutboxItem, ReadResult, Request, Response,
+    RoomStatus, RotateResult, SendResult, StatusResult, WhoEntry, WhoamiResult,
 };
 use diavlos_client::Paths;
 use diavlos_core::{
     message::{now_ts, APPROVE_TTL_SECS},
     names::validate_name,
     room::new_room_id,
-    secrets, ControlOp, Error, InviteSpec, Kind, LocalMember, Member, Message, MessageType, Policy,
-    Result, Role, Room,
+    secrets, ControlOp, DeliveryState, Error, InviteSpec, Kind, LocalMember, Member, Message,
+    MessageType, Policy, Result, Role, Room, Settle,
 };
 use interprocess::local_socket::tokio::{prelude::*, Listener, Stream};
 use interprocess::local_socket::ListenerOptions;
@@ -126,10 +126,33 @@ async fn handle(helper: Arc<Helper>, stream: Stream) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Request::Watch { room, identity } => {
-            let r = stream_watch(&helper, &stream, &room, &identity).await;
+        Request::Watch {
+            room,
+            identity,
+            manual_ack,
+        } => {
+            let r = stream_watch(&helper, &stream, &room, &identity, manual_ack).await;
             if let Err(e) = r {
                 let _ = write_line(&stream, &Response::err(&e)).await;
+            }
+            Ok(())
+        }
+        Request::Next {
+            room,
+            identity,
+            timeout_secs,
+            manual_ack: false,
+            lease_secs,
+        } => {
+            // An older caller: it gets the message alone, and it is acked
+            // once written to the socket. If the write fails it is not, and
+            // it is handed out again when the lease runs out.
+            match next(&helper, &room, &identity, timeout_secs, lease_secs).await {
+                Ok(r) => {
+                    write_line(&stream, &Response::ok(&r.message)).await?;
+                    settle(&helper, &identity, &r.delivery.token, SettleHow::Ack).await?;
+                }
+                Err(e) => write_line(&stream, &Response::err(&e)).await?,
             }
             Ok(())
         }
@@ -199,13 +222,60 @@ async fn dispatch(helper: &Arc<Helper>, req: Request) -> Result<serde_json::Valu
             room,
             identity,
             timeout_secs,
-        } => serde_json::to_value(next(helper, &room, &identity, timeout_secs).await?)?,
+            lease_secs,
+            ..
+        } => serde_json::to_value(next(helper, &room, &identity, timeout_secs, lease_secs).await?)?,
         Request::Read {
             room,
             identity,
             since,
             limit,
-        } => serde_json::to_value(read(helper, &room, &identity, since, limit).await?)?,
+            ack,
+        } => serde_json::to_value(read(helper, &room, &identity, since, limit, ack).await?)?,
+        Request::Ack { identity, token } => {
+            serde_json::to_value(settle(helper, &identity, &token, SettleHow::Ack).await?)?
+        }
+        Request::Renew {
+            identity,
+            token,
+            lease_secs,
+        } => serde_json::to_value(
+            settle(
+                helper,
+                &identity,
+                &token,
+                SettleHow::Renew(lease_secs.unwrap_or(helper.config.helper.lease_secs)),
+            )
+            .await?,
+        )?,
+        Request::Nack {
+            identity,
+            token,
+            retry_in_secs,
+        } => serde_json::to_value(
+            settle(
+                helper,
+                &identity,
+                &token,
+                SettleHow::Nack(retry_in_secs.unwrap_or(60)),
+            )
+            .await?,
+        )?,
+        Request::Peek {
+            room,
+            identity,
+            limit,
+        } => serde_json::to_value(peek(helper, &room, &identity, limit)?)?,
+        Request::Deliveries {
+            room,
+            identity,
+            all,
+        } => serde_json::to_value(deliveries(helper, &room, &identity, all)?)?,
+        Request::Replay {
+            room,
+            identity,
+            seq,
+        } => serde_json::to_value(replay(helper, &room, &identity, seq)?)?,
         Request::Ask {
             room,
             identity,
@@ -329,6 +399,12 @@ async fn status(helper: &Helper) -> Result<StatusResult> {
                     .unwrap_or(false),
             members: helper.store.members(&room.id)?.len(),
             messages: helper.store.message_count(&room.id)?,
+            quarantined_deliveries: helper
+                .store
+                .deliveries(&room.id, None)?
+                .iter()
+                .filter(|d| d.state == DeliveryState::Quarantined)
+                .count() as u64,
             queued: outbox.queued(),
             failed: outbox.failed,
             quarantined: outbox.quarantined,
@@ -845,15 +921,32 @@ async fn wait_for<F>(
     helper: &Helper,
     room: &Room,
     deadline: Option<tokio::time::Instant>,
-    mut check: F,
+    check: F,
 ) -> Result<Message>
 where
     F: FnMut() -> Result<Option<Message>>,
 {
+    wait_until(helper, room, deadline, check, || None).await
+}
+
+/// Wait until `check` finds something, the deadline passes, or `due`
+/// says a lease runs out or a delay passes: something may be free then
+/// without any new message arriving.
+async fn wait_until<T, F, D>(
+    helper: &Helper,
+    room: &Room,
+    deadline: Option<tokio::time::Instant>,
+    mut check: F,
+    mut due: D,
+) -> Result<T>
+where
+    F: FnMut() -> Result<Option<T>>,
+    D: FnMut() -> Option<tokio::time::Instant>,
+{
     let mut rx = helper.subscribe();
     loop {
-        if let Some(m) = check()? {
-            return Ok(m);
+        if let Some(v) = check()? {
+            return Ok(v);
         }
         let wait = async {
             loop {
@@ -868,12 +961,18 @@ where
                 }
             }
         };
-        match deadline {
-            Some(d) => {
-                if tokio::time::timeout_at(d, wait).await.is_err() {
+        let wake = match (deadline, due()) {
+            (Some(d), Some(u)) => Some(d.min(u)),
+            (d, u) => d.or(u),
+        };
+        match wake {
+            Some(w) => {
+                if tokio::time::timeout_at(w, wait).await.is_err()
+                    && deadline.is_some_and(|d| tokio::time::Instant::now() >= d)
+                {
                     // One last look before giving up.
-                    if let Some(m) = check()? {
-                        return Ok(m);
+                    if let Some(v) = check()? {
+                        return Ok(v);
                     }
                     return Err(Error::TimedOut);
                 }
@@ -891,53 +990,143 @@ fn deadline(timeout_secs: u64) -> Option<tokio::time::Instant> {
     }
 }
 
-/// Messages an agent wants to wake up for: not its own, not helper or
-/// owner housekeeping.
-fn wanted(m: &Message, me: &str) -> bool {
-    m.from != me && !matches!(m.kind, MessageType::System | MessageType::Control)
+fn ts(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Wait for the next message from someone else. Skips your own and
-/// housekeeping, moving the bookmark past them.
+/// When a waiting `next` for `reader` should look again: just after the
+/// soonest lease runs out or delay passes.
+fn next_due(helper: &Helper, room_id: &str, reader: &str) -> Option<tokio::time::Instant> {
+    let now = helper.now();
+    let due = helper
+        .store
+        .delivery_next_due(room_id, reader, &ts(now))
+        .ok()??;
+    let at = chrono::DateTime::parse_from_rfc3339(&due).ok()?;
+    let secs = (at.with_timezone(&chrono::Utc) - now).num_seconds().max(0) as u64;
+    Some(tokio::time::Instant::now() + Duration::from_secs(secs + 1))
+}
+
+/// Hand out the next message from someone else, leased to this reader.
+/// Your own messages and housekeeping settle by themselves.
 pub(super) async fn next(
     helper: &Helper,
     room: &str,
     identity: &str,
     timeout_secs: u64,
-) -> Result<Message> {
+    lease_secs: Option<u64>,
+) -> Result<NextResult> {
     let room = helper.store.room(room)?;
     let lm = local_member(helper, &room, identity)?;
     let reader = lm.member.name.clone();
+    let lease = lease_secs
+        .unwrap_or(helper.config.helper.lease_secs)
+        .clamp(1, 7 * 24 * 3600) as i64;
+    let max = helper.config.helper.max_attempts.max(1);
     let dl = deadline(timeout_secs);
-    wait_for(helper, &room, dl, || {
-        let bookmark = helper.store.bookmark(&room.id, &reader)?;
-        let batch = helper.store.messages_after(&room.id, bookmark, 100)?;
-        let mut skip_to = bookmark;
-        for m in batch {
-            if wanted(&m, &reader) {
-                helper.store.set_bookmark(&room.id, &reader, m.seq)?;
-                return Ok(Some(m));
-            }
-            skip_to = m.seq;
-        }
-        if skip_to > bookmark {
-            helper.store.set_bookmark(&room.id, &reader, skip_to)?;
-        }
-        Ok(None)
+    let (message, d) = wait_until(
+        helper,
+        &room,
+        dl,
+        || {
+            let now = helper.now();
+            helper.store.delivery_lease(
+                &room.id,
+                &reader,
+                &ts(now),
+                &ts(now + chrono::Duration::seconds(lease)),
+                max,
+            )
+        },
+        || next_due(helper, &room.id, &reader),
+    )
+    .await?;
+    if helper.faults.hit("delivery.after_lease_before_reply") {
+        return Err(Error::Io(std::io::Error::other(
+            "injected fault after the lease was written",
+        )));
+    }
+    Ok(NextResult {
+        message,
+        delivery: DeliveryInfo {
+            token: d.token.unwrap_or_default(),
+            lease_until: d.lease_until.unwrap_or_default(),
+            attempt: d.attempt,
+        },
     })
-    .await
 }
 
-/// Read from your bookmark onward. Never deletes. Moves the bookmark to
-/// the last message returned. A read from a given `since` is a look back:
-/// it leaves the bookmark where it is, so a web page or a script paging
-/// through the log never makes an agent miss or repeat a message.
+pub(super) enum SettleHow {
+    Ack,
+    /// Seconds more.
+    Renew(u64),
+    /// Seconds until it is handed out again.
+    Nack(u64),
+}
+
+/// Settle a delivery this identity holds.
+pub(super) async fn settle(
+    helper: &Helper,
+    identity: &str,
+    token: &str,
+    how: SettleHow,
+) -> Result<diavlos_core::Delivery> {
+    let d = helper.store.delivery_by_token(token)?.ok_or_else(|| {
+        Error::Denied(
+            "that delivery is no longer yours: it was settled, or its lease ran out and it was \
+             handed out again under a new token"
+                .into(),
+        )
+    })?;
+    let lm = helper
+        .store
+        .local_member(&d.room_id, identity)?
+        .ok_or_else(|| Error::NotInRoom(d.room_id.clone()))?;
+    if lm.member.name != d.reader {
+        return Err(Error::Denied(format!(
+            "that delivery was handed to {}, not to {}",
+            d.reader, lm.member.name
+        )));
+    }
+    let now = helper.now();
+    let how = match how {
+        SettleHow::Ack => Settle::Ack,
+        SettleHow::Renew(secs) => Settle::Renew {
+            lease_until: ts(now + chrono::Duration::seconds(secs.clamp(1, 7 * 24 * 3600) as i64)),
+        },
+        SettleHow::Nack(secs) => Settle::Nack {
+            retry_at: ts(now + chrono::Duration::seconds(secs.min(7 * 24 * 3600) as i64)),
+        },
+    };
+    let out = helper.store.delivery_settle(
+        token,
+        &how,
+        &ts(now),
+        helper.config.helper.max_attempts.max(1),
+    )?;
+    if out.state == DeliveryState::Quarantined {
+        helper.emit(
+            "delivery_quarantined",
+            Some(&out.room_id),
+            serde_json::json!({"seq": out.seq, "reader": out.reader, "attempt": out.attempt}),
+        );
+    }
+    // A watch stream waiting on this one can go on.
+    helper.notify_room(&out.room_id, 0);
+    Ok(out)
+}
+
+/// Look at messages from the bookmark onward, or from `since`. A pure
+/// view: it moves nothing, so a web page, a script or an agent looking
+/// back never makes anyone miss or repeat a message. With `ack`, exactly
+/// the messages returned are settled as taken on.
 pub(super) async fn read(
     helper: &Helper,
     room: &str,
     identity: &str,
     since: Option<u64>,
     limit: u32,
+    ack: bool,
 ) -> Result<ReadResult> {
     let room = helper.store.room(room)?;
     let lm = local_member(helper, &room, identity)?;
@@ -949,15 +1138,89 @@ pub(super) async fn read(
     let messages = helper
         .store
         .messages_after(&room.id, start, limit.clamp(1, 1000))?;
-    if since.is_none() {
-        if let Some(last) = messages.last() {
-            helper.store.set_bookmark(&room.id, &reader, last.seq)?;
-        }
+    if ack && !messages.is_empty() {
+        let seqs: Vec<u64> = messages.iter().map(|m| m.seq).collect();
+        helper
+            .store
+            .delivery_ack_seqs(&room.id, &reader, &seqs, &helper.now_ts())?;
+        helper.notify_room(&room.id, 0);
     }
     Ok(ReadResult {
         bookmark: helper.store.bookmark(&room.id, &reader)?,
         messages,
     })
+}
+
+/// What is owed to this identity, without handing anything out.
+fn peek(helper: &Helper, room: &str, identity: &str, limit: u32) -> Result<Vec<Message>> {
+    let room = helper.store.room(room)?;
+    let lm = local_member(helper, &room, identity)?;
+    helper.store.delivery_peek(
+        &room.id,
+        &lm.member.name,
+        &helper.now_ts(),
+        limit.clamp(1, 100),
+    )
+}
+
+fn deliveries(helper: &Helper, room: &str, identity: &str, all: bool) -> Result<Vec<DeliveryItem>> {
+    let room = helper.store.room(room)?;
+    let reader = if all {
+        None
+    } else {
+        Some(local_member(helper, &room, identity)?.member.name)
+    };
+    let mut out = Vec::new();
+    for d in helper.store.deliveries(&room.id, reader.as_deref())? {
+        let m = helper
+            .store
+            .messages_after(&room.id, d.seq.saturating_sub(1), 1)?
+            .into_iter()
+            .next();
+        out.push(DeliveryItem {
+            seq: d.seq,
+            reader: d.reader,
+            state: d.state.as_str().into(),
+            attempt: d.attempt,
+            lease_until: d.lease_until,
+            retry_at: d.retry_at,
+            from: m.as_ref().map(|m| m.from.clone()).unwrap_or_default(),
+            kind: m.as_ref().map(|m| m.kind),
+            text: m
+                .map(|m| {
+                    m.text
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(60)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+fn replay(helper: &Helper, room: &str, identity: &str, seq: u64) -> Result<serde_json::Value> {
+    let room = helper.store.room(room)?;
+    let lm = local_member(helper, &room, identity)?;
+    if !helper
+        .store
+        .delivery_replay(&room.id, &lm.member.name, seq, &helper.now_ts())?
+    {
+        return Err(Error::Invalid(format!(
+            "message {seq} is not quarantined for {} in {}",
+            lm.member.name, room.name
+        )));
+    }
+    helper.emit(
+        "delivery_replayed",
+        Some(&room.id),
+        serde_json::json!({"seq": seq, "reader": lm.member.name}),
+    );
+    helper.notify_room(&room.id, 0);
+    Ok(serde_json::json!({"seq": seq, "replayed": true}))
 }
 
 /// Send a question and wait for a reply to that exact message. A deny is
@@ -1247,43 +1510,186 @@ async fn stream_events(helper: &Helper, stream: &Stream, follow: bool) -> Result
     }
 }
 
-/// Stream messages from the bookmark onward, then live. Moves the
-/// bookmark as it goes.
-async fn stream_watch(helper: &Helper, stream: &Stream, room: &str, identity: &str) -> Result<()> {
+/// Stream messages from the bookmark onward, then live, each one leased.
+/// With `manual_ack` a line carries its token and the next line waits until
+/// that one is settled or its lease runs out; the reader acks through
+/// another call. Without it each is acked once written.
+async fn stream_watch(
+    helper: &Helper,
+    stream: &Stream,
+    room: &str,
+    identity: &str,
+    manual_ack: bool,
+) -> Result<()> {
     let room = helper.store.room(room)?;
-    let lm = local_member(helper, &room, identity)?;
-    let reader = lm.member.name.clone();
     loop {
-        let m = wait_for(helper, &room, None, || {
-            let bookmark = helper.store.bookmark(&room.id, &reader)?;
-            let batch = helper.store.messages_after(&room.id, bookmark, 100)?;
-            let mut skip_to = bookmark;
-            for m in batch {
-                if wanted(&m, &reader) {
-                    helper.store.set_bookmark(&room.id, &reader, m.seq)?;
-                    return Ok(Some(m));
-                }
-                skip_to = m.seq;
-            }
-            if skip_to > bookmark {
-                helper.store.set_bookmark(&room.id, &reader, skip_to)?;
-            }
-            Ok(None)
-        })
-        .await?;
-        let (from_key, from_fingerprint) = match helper.store.member_by_name(&room.id, &m.from)? {
-            Some(member) => (member.key.to_string(), member.key.fingerprint()),
-            None => (String::new(), String::new()),
-        };
-        write_line(
-            stream,
-            &Response::ok(serde_json::json!({
-                "message": m,
-                "from_key": from_key,
-                "from_fingerprint": from_fingerprint,
-            })),
+        let r = next(helper, &room.name, identity, 0, None).await?;
+        let (from_key, from_fingerprint) =
+            match helper.store.member_by_name(&room.id, &r.message.from)? {
+                Some(member) => (member.key.to_string(), member.key.fingerprint()),
+                None => (String::new(), String::new()),
+            };
+        let mut line = serde_json::json!({
+            "message": r.message,
+            "from_key": from_key,
+            "from_fingerprint": from_fingerprint,
+        });
+        if manual_ack {
+            line["delivery"] = serde_json::to_value(&r.delivery)?;
+        }
+        write_line(stream, &Response::ok(line)).await?;
+        if !manual_ack {
+            settle(helper, identity, &r.delivery.token, SettleHow::Ack).await?;
+            continue;
+        }
+        let token = r.delivery.token.clone();
+        wait_until(
+            helper,
+            &room,
+            None,
+            || {
+                let now = helper.now_ts();
+                Ok(match helper.store.delivery_by_token(&token)? {
+                    Some(d)
+                        if d.state == DeliveryState::Leased
+                            && d.lease_until.as_deref().is_some_and(|t| t > now.as_str()) =>
+                    {
+                        None
+                    }
+                    _ => Some(()),
+                })
+            },
+            || {
+                let d = helper.store.delivery_by_token(&token).ok()??;
+                let at = chrono::DateTime::parse_from_rfc3339(d.lease_until.as_deref()?).ok()?;
+                let secs = (at.with_timezone(&chrono::Utc) - helper.now()).num_seconds();
+                Some(tokio::time::Instant::now() + Duration::from_secs(secs.max(0) as u64 + 1))
+            },
         )
         .await?;
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use crate::helper::testkit::{helper, room_with, TempHome};
+
+    async fn one_task() -> (TempHome, Arc<Helper>) {
+        let dir = TempHome::new("deliver");
+        let h = helper("home", &dir, None);
+        room_with(&h, "ops", &[(&h, "worker", "worker", false)]).await;
+        send(
+            &h,
+            "ops",
+            "default",
+            DraftWire {
+                text: "fix the build".into(),
+                kind: Some(MessageType::Task),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (dir, h)
+    }
+
+    #[tokio::test]
+    async fn an_answer_lost_after_the_lease_is_written_is_handed_out_again() {
+        let (_dir, h) = one_task().await;
+        h.faults.arm("delivery.after_lease_before_reply");
+        assert!(next(&h, "ops", "worker", 1, None).await.is_err());
+        // Leased to nobody who knows it: nothing is handed out until the
+        // lease runs out...
+        assert!(matches!(
+            next(&h, "ops", "worker", 1, None).await,
+            Err(Error::TimedOut)
+        ));
+        // ...and then the same message comes round.
+        h.skew_clock(601);
+        let again = next(&h, "ops", "worker", 1, None).await.unwrap();
+        assert_eq!(again.message.text, "fix the build");
+        assert_eq!(again.delivery.attempt, 2);
+    }
+
+    #[tokio::test]
+    async fn a_slow_worker_cannot_ack_the_newer_delivery() {
+        let (_dir, h) = one_task().await;
+        let slow = next(&h, "ops", "worker", 1, None).await.unwrap();
+        h.skew_clock(601);
+        let fresh = next(&h, "ops", "worker", 1, None).await.unwrap();
+        assert_eq!(fresh.message.id, slow.message.id);
+        assert!(matches!(
+            settle(&h, "worker", &slow.delivery.token, SettleHow::Ack).await,
+            Err(Error::Denied(_))
+        ));
+        // The newer one is untouched by that, and settles.
+        settle(&h, "worker", &fresh.delivery.token, SettleHow::Renew(60))
+            .await
+            .unwrap();
+        settle(&h, "worker", &fresh.delivery.token, SettleHow::Ack)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn five_lost_leases_quarantine_it_status_shows_it_and_replay_brings_it_back() {
+        let (_dir, h) = one_task().await;
+        let mut seq = 0;
+        for attempt in 1..=5 {
+            let r = next(&h, "ops", "worker", 1, None).await.unwrap();
+            assert_eq!(r.delivery.attempt, attempt);
+            seq = r.message.seq;
+            h.skew_clock(601);
+        }
+        assert!(matches!(
+            next(&h, "ops", "worker", 1, None).await,
+            Err(Error::TimedOut)
+        ));
+        let st = status(&h).await.unwrap();
+        assert_eq!(st.rooms[0].quarantined_deliveries, 1);
+        let listed = deliveries(&h, "ops", "worker", false).unwrap();
+        assert_eq!(listed[0].state, "quarantined");
+        assert_eq!(listed[0].text, "fix the build");
+
+        replay(&h, "ops", "worker", seq).unwrap();
+        let back = next(&h, "ops", "worker", 1, None).await.unwrap();
+        assert_eq!((back.message.seq, back.delivery.attempt), (seq, 1));
+        settle(&h, "worker", &back.delivery.token, SettleHow::Ack)
+            .await
+            .unwrap();
+        assert_eq!(status(&h).await.unwrap().rooms[0].quarantined_deliveries, 0);
+    }
+
+    #[tokio::test]
+    async fn nack_hands_it_back_after_the_delay_and_quarantines_at_the_limit() {
+        let (_dir, h) = one_task().await;
+        let mut events = h.subscribe_events();
+        for attempt in 1..=5u32 {
+            let r = next(&h, "ops", "worker", 1, None).await.unwrap();
+            assert_eq!(r.delivery.attempt, attempt);
+            let d = settle(&h, "worker", &r.delivery.token, SettleHow::Nack(30))
+                .await
+                .unwrap();
+            if attempt < 5 {
+                assert_eq!(d.state, DeliveryState::Delayed);
+                assert!(matches!(
+                    next(&h, "ops", "worker", 1, None).await,
+                    Err(Error::TimedOut)
+                ));
+                h.skew_clock(31);
+            } else {
+                assert_eq!(d.state, DeliveryState::Quarantined);
+            }
+        }
+        let mut kinds = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            kinds.push(ev.kind);
+        }
+        assert!(
+            kinds.contains(&"delivery_quarantined".to_string()),
+            "{kinds:?}"
+        );
     }
 }
 

@@ -165,7 +165,7 @@ fn claims_approvals_and_owner_controls() {
 
     // Ask a human first: the approve signs the exact action, works once,
     // and only a human key counts.
-    c.ok(&["read", "ops", "--limit", "500"]);
+    c.ok(&["read", "ops", "--limit", "500", "--ack"]);
     let action =
         r#"{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}"#;
     let asking = b
@@ -320,7 +320,7 @@ fn claims_approvals_and_owner_controls() {
         env: Vec::new(),
     };
     a2.ok(&["join", &inv]);
-    a.ok(&["read", "ops", "--limit", "500"]);
+    a.ok(&["read", "ops", "--limit", "500", "--ack"]);
     a2.ok(&["send", "ops", "same laptop", "--type", "task"]);
     let got = a.ok(&["next", "ops", "--timeout", "10"]);
     assert!(got.contains("scanner (task): same laptop"), "{got}");

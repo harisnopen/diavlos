@@ -32,7 +32,13 @@ pub async fn run(
         let room = room.clone();
         let identity = identity.clone();
         async move {
-            let mut stream = client.stream(&Request::Watch { room, identity }).await?;
+            let mut stream = client
+                .stream(&Request::Watch {
+                    room,
+                    identity: identity.clone(),
+                    manual_ack: true,
+                })
+                .await?;
             while let Some(v) = stream.next().await? {
                 let m: Message = serde_json::from_value(v["message"].clone())?;
                 let text = format_for_slack(&m);
@@ -43,9 +49,11 @@ pub async fn run(
                     .send()
                     .await?;
                 let body: Value = r.json().await.unwrap_or(Value::Null);
-                if body["ok"].as_bool() != Some(true) {
+                let posted = body["ok"].as_bool() == Some(true);
+                if !posted {
                     eprintln!("slack: {}", body["error"].as_str().unwrap_or("post failed"));
                 }
+                super::settle(&client, &identity, &v, posted).await;
             }
             anyhow::Ok(())
         }

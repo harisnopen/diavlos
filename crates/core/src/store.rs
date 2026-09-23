@@ -148,6 +148,25 @@ const MIGRATIONS: &[M<'static>] = &[
     );
     "#,
     ),
+    // A message handed to a reader stays that reader's until it settles
+    // it. The bookmark is the settled prefix; it never passes a message
+    // still owed.
+    M::up(
+        r#"
+    CREATE TABLE deliveries (
+      room_id TEXT NOT NULL,
+      reader TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      token TEXT UNIQUE,
+      lease_until TEXT,
+      retry_at TEXT,
+      attempt INTEGER NOT NULL DEFAULT 0,
+      updated TEXT NOT NULL,
+      PRIMARY KEY (room_id, reader, seq)
+    );
+    "#,
+    ),
 ];
 
 /// How many legacy outbox rows are sealed per transaction.
@@ -260,6 +279,93 @@ impl OutboxCounts {
     pub fn queued(&self) -> u64 {
         self.pending + self.waiting
     }
+}
+
+/// Where a message stands for one reader. No row means available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeliveryState {
+    /// Handed out; only the holder of `token` can settle it until
+    /// `lease_until`. After that it is available again.
+    Leased,
+    /// The reader took it on. Not "done": finishing a task is a `done`
+    /// message in the room.
+    Acked,
+    /// Handed back to try later; available again at `retry_at`.
+    Delayed,
+    /// Handed out the most times allowed and never settled. Out of the
+    /// way, kept, and never skipped silently: `replay` brings it back.
+    Quarantined,
+    /// Brought back from quarantine; available now.
+    Replay,
+}
+
+impl DeliveryState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeliveryState::Leased => "leased",
+            DeliveryState::Acked => "acked",
+            DeliveryState::Delayed => "delayed",
+            DeliveryState::Quarantined => "quarantined",
+            DeliveryState::Replay => "replay",
+        }
+    }
+
+    fn parse(s: &str) -> DeliveryState {
+        match s {
+            "acked" => DeliveryState::Acked,
+            "delayed" => DeliveryState::Delayed,
+            "quarantined" => DeliveryState::Quarantined,
+            "replay" => DeliveryState::Replay,
+            _ => DeliveryState::Leased,
+        }
+    }
+}
+
+/// One message handed to one reader.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Delivery {
+    pub room_id: String,
+    pub reader: String,
+    pub seq: u64,
+    pub state: DeliveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
+    /// How many times it has been handed out.
+    pub attempt: u32,
+    pub updated: String,
+}
+
+/// How a reader settles a delivery it holds.
+#[derive(Debug, Clone)]
+pub enum Settle {
+    /// Taken on.
+    Ack,
+    /// Still working: hold it until this time.
+    Renew { lease_until: String },
+    /// Not now: hand it out again at this time.
+    Nack { retry_at: String },
+}
+
+/// A message after the bookmark and where it stands for one reader: seq,
+/// sender, type, delivery state, lease_until, retry_at.
+type Candidate = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Does `reader` want to be handed this message? Not its own, not helper
+/// or owner housekeeping. The rest settle by themselves.
+fn wanted(from: &str, kind: &str, reader: &str) -> bool {
+    from != reader && kind != "system" && kind != "control"
 }
 
 /// Whole seconds from `a` to `b`, both RFC 3339. 0 if either is unreadable.
@@ -1037,6 +1143,406 @@ impl Store {
             params![room_id, reader, seq as i64],
         )?;
         Ok(())
+    }
+
+    // ---- deliveries ----------------------------------------------------
+    //
+    // available -> leased          `next`: a new token, attempt + 1
+    // leased -> acked              ack with the current token
+    // leased -> leased             renew with the current token
+    // leased -> delayed            nack with the current token
+    // leased -> available          the lease runs out
+    // leased|delayed -> quarantined  at the attempt limit
+    // delayed -> available         retry_at passes
+    // quarantined -> replay        `deliveries replay`
+    //
+    // A token is replaced each time a message is handed out, so a worker
+    // whose lease ran out cannot settle the newer delivery.
+
+    fn row_to_delivery(row: &Row<'_>) -> rusqlite::Result<Delivery> {
+        let state: String = row.get("state")?;
+        Ok(Delivery {
+            room_id: row.get("room_id")?,
+            reader: row.get("reader")?,
+            seq: row.get::<_, i64>("seq")? as u64,
+            state: DeliveryState::parse(&state),
+            token: row.get("token")?,
+            lease_until: row.get("lease_until")?,
+            retry_at: row.get("retry_at")?,
+            attempt: row.get::<_, i64>("attempt")? as u32,
+            updated: row.get("updated")?,
+        })
+    }
+
+    fn bookmark_in(conn: &Connection, room_id: &str, reader: &str) -> Result<u64> {
+        let seq: Option<i64> = conn
+            .query_row(
+                "SELECT seq FROM bookmarks WHERE room_id=?1 AND reader=?2",
+                params![room_id, reader],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(seq.unwrap_or(0) as u64)
+    }
+
+    /// Move the bookmark over every settled message after it: ones the
+    /// reader does not want, acked ones and quarantined ones. It stops at
+    /// the first message still owed. Returns the new bookmark.
+    fn advance_bookmark_in(conn: &Connection, room_id: &str, reader: &str) -> Result<u64> {
+        let start = Self::bookmark_in(conn, room_id, reader)?;
+        let mut bm = start;
+        'pages: loop {
+            let mut stmt = conn.prepare_cached(
+                "SELECT m.seq, m.from_name, m.type, d.state FROM messages m
+                 LEFT JOIN deliveries d ON d.room_id=m.room_id AND d.reader=?2 AND d.seq=m.seq
+                 WHERE m.room_id=?1 AND m.seq>?3 ORDER BY m.seq LIMIT 500",
+            )?;
+            let rows: Vec<(i64, String, String, Option<String>)> = stmt
+                .query_map(params![room_id, reader, bm as i64], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let n = rows.len();
+            for (seq, from, kind, state) in rows {
+                let settled = !wanted(&from, &kind, reader)
+                    || matches!(state.as_deref(), Some("acked") | Some("quarantined"));
+                if !settled {
+                    break 'pages;
+                }
+                bm = seq as u64;
+            }
+            if n < 500 {
+                break;
+            }
+        }
+        if bm > start {
+            conn.execute(
+                "INSERT INTO bookmarks (room_id, reader, seq) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(room_id, reader) DO UPDATE SET seq=MAX(bookmarks.seq, excluded.seq)",
+                params![room_id, reader, bm as i64],
+            )?;
+        }
+        Ok(bm)
+    }
+
+    /// Hand the next message owed to `reader` out, leased until
+    /// `lease_until`. The lowest seq first. `None` when nothing is owed.
+    pub fn delivery_lease(
+        &self,
+        room_id: &str,
+        reader: &str,
+        now: &str,
+        lease_until: &str,
+        max_attempts: u32,
+    ) -> Result<Option<(Message, Delivery)>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        // Leases that ran out at the attempt limit go to quarantine.
+        tx.execute(
+            "UPDATE deliveries SET state='quarantined', token=NULL, updated=?3
+             WHERE room_id=?1 AND reader=?2 AND state='leased' AND lease_until<=?3 AND attempt>=?4",
+            params![room_id, reader, now, max_attempts],
+        )?;
+        let bm = Self::advance_bookmark_in(&tx, room_id, reader)?;
+        // Anything at or below the bookmark first: replays, and replayed
+        // messages whose lease ran out or whose delay passed.
+        let mut seq: Option<i64> = tx
+            .query_row(
+                "SELECT seq FROM deliveries WHERE room_id=?1 AND reader=?2 AND seq<=?3 AND (
+                   state='replay'
+                   OR (state='leased' AND lease_until<=?4)
+                   OR (state='delayed' AND retry_at<=?4))
+                 ORDER BY seq LIMIT 1",
+                params![room_id, reader, bm as i64, now],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut after = bm as i64;
+        while seq.is_none() {
+            let rows: Vec<Candidate> = {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT m.seq, m.from_name, m.type, d.state, d.lease_until, d.retry_at
+                     FROM messages m
+                     LEFT JOIN deliveries d ON d.room_id=m.room_id AND d.reader=?2 AND d.seq=m.seq
+                     WHERE m.room_id=?1 AND m.seq>?3 ORDER BY m.seq LIMIT 500",
+                )?;
+                let rows = stmt.query_map(params![room_id, reader, after], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for (s, from, kind, state, lease_until, retry_at) in &rows {
+                after = *s;
+                if !wanted(from, kind, reader) {
+                    continue;
+                }
+                let free = match state.as_deref() {
+                    None | Some("replay") => true,
+                    Some("leased") => lease_until.as_deref().is_some_and(|t| t <= now),
+                    Some("delayed") => retry_at.as_deref().is_some_and(|t| t <= now),
+                    _ => false,
+                };
+                if free {
+                    seq = Some(*s);
+                    break;
+                }
+            }
+        }
+        let Some(seq) = seq else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let token = format!(
+            "d_{}",
+            data_encoding::HEXLOWER.encode(&rand::random::<[u8; 16]>())
+        );
+        tx.execute(
+            "INSERT INTO deliveries (room_id, reader, seq, state, token, lease_until, attempt, updated)
+             VALUES (?1, ?2, ?3, 'leased', ?4, ?5, 1, ?6)
+             ON CONFLICT(room_id, reader, seq) DO UPDATE SET
+               state='leased', token=excluded.token, lease_until=excluded.lease_until,
+               retry_at=NULL, attempt=deliveries.attempt+1, updated=excluded.updated",
+            params![room_id, reader, seq, token, lease_until, now],
+        )?;
+        self.faults.check("delivery.lease")?;
+        let msg = tx.query_row(
+            "SELECT m.envelope, c.body, c.deleted FROM messages m
+             LEFT JOIN contents c ON c.msg_id = m.id WHERE m.room_id=?1 AND m.seq=?2",
+            params![room_id, seq],
+            |r| self.row_to_message(r),
+        )?;
+        let d = tx.query_row(
+            "SELECT * FROM deliveries WHERE room_id=?1 AND reader=?2 AND seq=?3",
+            params![room_id, reader, seq],
+            Self::row_to_delivery,
+        )?;
+        tx.commit()?;
+        Ok(Some((msg, d)))
+    }
+
+    /// The delivery a token names, if it still names one.
+    pub fn delivery_by_token(&self, token: &str) -> Result<Option<Delivery>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM deliveries WHERE token=?1",
+                params![token],
+                Self::row_to_delivery,
+            )
+            .optional()?)
+    }
+
+    /// Settle a delivery by its token. Refused if the token no longer names
+    /// a message this reader holds: it was settled, or its lease ran out
+    /// and it was handed out again under a new token. Acking twice is fine.
+    ///
+    /// An ack after the lease ran out still counts if nobody was handed the
+    /// message since: the token is still the current one.
+    pub fn delivery_settle(
+        &self,
+        token: &str,
+        how: &Settle,
+        now: &str,
+        max_attempts: u32,
+    ) -> Result<Delivery> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let d = tx
+            .query_row(
+                "SELECT * FROM deliveries WHERE token=?1",
+                params![token],
+                Self::row_to_delivery,
+            )
+            .optional()?
+            .ok_or_else(|| {
+                Error::Denied(
+                    "that delivery is no longer yours: it was settled, or its lease ran out and \
+                     it was handed out again under a new token"
+                        .into(),
+                )
+            })?;
+        let key = params![d.room_id, d.reader, d.seq as i64, now];
+        match (d.state, how) {
+            (DeliveryState::Acked, Settle::Ack) => {}
+            (DeliveryState::Leased, Settle::Ack) => {
+                tx.execute(
+                    "UPDATE deliveries SET state='acked', lease_until=NULL, updated=?4
+                     WHERE room_id=?1 AND reader=?2 AND seq=?3",
+                    key,
+                )?;
+            }
+            (DeliveryState::Leased, Settle::Renew { lease_until }) => {
+                tx.execute(
+                    "UPDATE deliveries SET lease_until=?5, updated=?4
+                     WHERE room_id=?1 AND reader=?2 AND seq=?3",
+                    params![d.room_id, d.reader, d.seq as i64, now, lease_until],
+                )?;
+            }
+            (DeliveryState::Leased, Settle::Nack { retry_at }) => {
+                let quarantine = d.attempt >= max_attempts;
+                tx.execute(
+                    "UPDATE deliveries SET state=?5, token=NULL, lease_until=NULL, retry_at=?6, updated=?4
+                     WHERE room_id=?1 AND reader=?2 AND seq=?3",
+                    params![
+                        d.room_id,
+                        d.reader,
+                        d.seq as i64,
+                        now,
+                        if quarantine { "quarantined" } else { "delayed" },
+                        if quarantine { None } else { Some(retry_at) }
+                    ],
+                )?;
+            }
+            (state, _) => {
+                return Err(Error::Denied(format!(
+                    "that delivery is {} and can only be acked again",
+                    state.as_str()
+                )))
+            }
+        }
+        Self::advance_bookmark_in(&tx, &d.room_id, &d.reader)?;
+        // Acked rows the bookmark has passed are kept a day, so a repeated
+        // ack still finds them, then pruned.
+        let day_ago = chrono::DateTime::parse_from_rfc3339(now)
+            .map(|t| {
+                (t - chrono::Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            })
+            .unwrap_or_default();
+        tx.execute(
+            "DELETE FROM deliveries WHERE room_id=?1 AND reader=?2 AND state='acked'
+               AND updated<?3 AND seq<=(SELECT seq FROM bookmarks WHERE room_id=?1 AND reader=?2)",
+            params![d.room_id, d.reader, day_ago],
+        )?;
+        let out = tx.query_row(
+            "SELECT * FROM deliveries WHERE room_id=?1 AND reader=?2 AND seq=?3",
+            params![d.room_id, d.reader, d.seq as i64],
+            Self::row_to_delivery,
+        )?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Settle these messages as taken on, whatever their lease: the reader
+    /// read them and said so (`read --ack`). Quarantined ones stay as a
+    /// record. Returns the new bookmark.
+    pub fn delivery_ack_seqs(
+        &self,
+        room_id: &str,
+        reader: &str,
+        seqs: &[u64],
+        now: &str,
+    ) -> Result<u64> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        for seq in seqs {
+            tx.execute(
+                "INSERT INTO deliveries (room_id, reader, seq, state, attempt, updated)
+                 VALUES (?1, ?2, ?3, 'acked', 1, ?4)
+                 ON CONFLICT(room_id, reader, seq) DO UPDATE SET
+                   state='acked', token=NULL, lease_until=NULL, retry_at=NULL, updated=?4
+                 WHERE deliveries.state != 'quarantined'",
+                params![room_id, reader, *seq as i64, now],
+            )?;
+        }
+        let bm = Self::advance_bookmark_in(&tx, room_id, reader)?;
+        tx.commit()?;
+        Ok(bm)
+    }
+
+    /// Bring a quarantined message back: handed out again next, as if new.
+    pub fn delivery_replay(
+        &self,
+        room_id: &str,
+        reader: &str,
+        seq: u64,
+        now: &str,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE deliveries SET state='replay', token=NULL, lease_until=NULL, retry_at=NULL,
+               attempt=0, updated=?4
+             WHERE room_id=?1 AND reader=?2 AND seq=?3 AND state='quarantined'",
+            params![room_id, reader, seq as i64, now],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// What is owed to `reader`, without handing anything out: the
+    /// messages after the bookmark not yet settled, leased ones included,
+    /// delayed ones only once due. For a wake-up hook, which shows and
+    /// never takes.
+    pub fn delivery_peek(
+        &self,
+        room_id: &str,
+        reader: &str,
+        now: &str,
+        limit: u32,
+    ) -> Result<Vec<Message>> {
+        let bm = {
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            let bm = Self::advance_bookmark_in(&tx, room_id, reader)?;
+            tx.commit()?;
+            bm
+        };
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.envelope, c.body, c.deleted FROM messages m
+             LEFT JOIN contents c ON c.msg_id = m.id
+             LEFT JOIN deliveries d ON d.room_id=m.room_id AND d.reader=?2 AND d.seq=m.seq
+             WHERE m.room_id=?1 AND m.seq>?3
+               AND m.from_name != ?2 AND m.type NOT IN ('system', 'control')
+               AND (d.state IS NULL OR d.state IN ('leased', 'replay')
+                    OR (d.state='delayed' AND d.retry_at<=?4))
+             ORDER BY m.seq LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(params![room_id, reader, bm as i64, now, limit], |r| {
+            self.row_to_message(r)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Deliveries that are not simply done: leased, delayed, quarantined or
+    /// replayed. For one reader, or every reader of a room.
+    pub fn deliveries(&self, room_id: &str, reader: Option<&str>) -> Result<Vec<Delivery>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM deliveries WHERE room_id=?1 AND (?2 IS NULL OR reader=?2)
+               AND state != 'acked' ORDER BY reader, seq",
+        )?;
+        let rows = stmt.query_map(params![room_id, reader], Self::row_to_delivery)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The soonest a lease runs out or a delay passes for `reader`, after
+    /// `now`: when a waiting `next` should look again.
+    pub fn delivery_next_due(
+        &self,
+        room_id: &str,
+        reader: &str,
+        now: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT MIN(t) FROM (
+               SELECT lease_until AS t FROM deliveries
+                 WHERE room_id=?1 AND reader=?2 AND state='leased' AND lease_until>?3
+               UNION ALL
+               SELECT retry_at AS t FROM deliveries
+                 WHERE room_id=?1 AND reader=?2 AND state='delayed' AND retry_at>?3)",
+            params![room_id, reader, now],
+            |r| r.get(0),
+        )?)
     }
 
     // ---- outbox --------------------------------------------------------
@@ -1895,5 +2401,224 @@ mod tests {
         s.outbox_add(&other).unwrap();
         let _ = s.append(&m);
         assert!(s.outbox_get(&m.id).unwrap().is_some());
+    }
+
+    fn at(secs: i64) -> String {
+        (chrono::DateTime::parse_from_rfc3339(T0).unwrap() + chrono::Duration::seconds(secs))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// A room with `n` chat messages from bob, read by haris. Returns their seqs.
+    fn owed(n: usize) -> (Store, Vec<u64>) {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let mut seqs = Vec::new();
+        for i in 0..n {
+            let mut m = msg_from(&owner, "bob", &format!("m{i}"));
+            s.sequence_and_append(&mut m).unwrap();
+            seqs.push(m.seq);
+        }
+        (s, seqs)
+    }
+
+    fn lease(s: &Store, now: i64) -> Option<Delivery> {
+        s.delivery_lease("r_test", "haris", &at(now), &at(now + 600), 5)
+            .unwrap()
+            .map(|(_, d)| d)
+    }
+
+    fn ack(s: &Store, d: &Delivery, now: i64) -> Result<Delivery> {
+        s.delivery_settle(d.token.as_deref().unwrap(), &Settle::Ack, &at(now), 5)
+    }
+
+    #[test]
+    fn the_bookmark_never_passes_a_message_still_owed() {
+        let (s, seqs) = owed(3);
+        let a = lease(&s, 0).unwrap();
+        let b = lease(&s, 0).unwrap();
+        let c = lease(&s, 0).unwrap();
+        assert_eq!((a.seq, b.seq, c.seq), (seqs[0], seqs[1], seqs[2]));
+        assert!(lease(&s, 0).is_none(), "all three are out");
+        // Acks out of order: the bookmark waits for the gap.
+        ack(&s, &c, 1).unwrap();
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), 0);
+        ack(&s, &a, 1).unwrap();
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), seqs[0]);
+        ack(&s, &b, 1).unwrap();
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), seqs[2]);
+        // Acking again is fine.
+        ack(&s, &b, 2).unwrap();
+    }
+
+    #[test]
+    fn a_lease_that_runs_out_is_handed_out_again_and_the_old_token_is_refused() {
+        let (s, seqs) = owed(1);
+        let first = lease(&s, 0).unwrap();
+        assert_eq!(first.attempt, 1);
+        assert!(lease(&s, 599).is_none(), "still leased");
+        let second = lease(&s, 600).unwrap();
+        assert_eq!(second.seq, seqs[0]);
+        assert_eq!(second.attempt, 2);
+        assert_ne!(first.token, second.token);
+        // The first worker finishes late: it cannot settle the newer one.
+        assert!(matches!(ack(&s, &first, 700), Err(Error::Denied(_))));
+        let renew = Settle::Renew {
+            lease_until: at(5000),
+        };
+        assert!(s
+            .delivery_settle(first.token.as_deref().unwrap(), &renew, &at(700), 5)
+            .is_err());
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), 0);
+        ack(&s, &second, 700).unwrap();
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), seqs[0]);
+    }
+
+    #[test]
+    fn a_late_ack_counts_if_nobody_was_handed_it_since() {
+        let (s, seqs) = owed(1);
+        let d = lease(&s, 0).unwrap();
+        ack(&s, &d, 5000).unwrap();
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), seqs[0]);
+    }
+
+    #[test]
+    fn renew_holds_it_and_nack_hands_it_back_later() {
+        let (s, _) = owed(1);
+        let d = lease(&s, 0).unwrap();
+        let t = d.token.clone().unwrap();
+        s.delivery_settle(
+            &t,
+            &Settle::Renew {
+                lease_until: at(2000),
+            },
+            &at(500),
+            5,
+        )
+        .unwrap();
+        assert!(lease(&s, 1500).is_none(), "renewed past the first lease");
+        s.delivery_settle(&t, &Settle::Nack { retry_at: at(3000) }, &at(1600), 5)
+            .unwrap();
+        assert!(lease(&s, 2999).is_none(), "not before retry_at");
+        let again = lease(&s, 3000).unwrap();
+        assert_eq!(again.attempt, 2);
+    }
+
+    #[test]
+    fn five_strikes_quarantine_it_the_lane_moves_on_and_replay_brings_it_back() {
+        let (s, seqs) = owed(2);
+        let mut now = 0;
+        for i in 1..=5 {
+            let d = lease(&s, now).unwrap();
+            assert_eq!((d.seq, d.attempt), (seqs[0], i));
+            now += 600;
+        }
+        // The fifth lease ran out: quarantined, and the next one is handed out.
+        let next = lease(&s, now).unwrap();
+        assert_eq!(next.seq, seqs[1]);
+        let q = s.deliveries("r_test", Some("haris")).unwrap();
+        assert!(q
+            .iter()
+            .any(|d| d.seq == seqs[0] && d.state == DeliveryState::Quarantined));
+        ack(&s, &next, now).unwrap();
+        assert_eq!(
+            s.bookmark("r_test", "haris").unwrap(),
+            seqs[1],
+            "quarantine counts as settled"
+        );
+        // Replay: handed out again first, as new.
+        assert!(s
+            .delivery_replay("r_test", "haris", seqs[0], &at(now))
+            .unwrap());
+        let back = lease(&s, now).unwrap();
+        assert_eq!((back.seq, back.attempt), (seqs[0], 1));
+        ack(&s, &back, now).unwrap();
+        assert!(lease(&s, now).is_none());
+    }
+
+    #[test]
+    fn own_and_housekeeping_messages_settle_by_themselves() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let mut mine = msg(&owner, "from me");
+        s.sequence_and_append(&mut mine).unwrap();
+        let mut sys = msg(&owner, "joined");
+        sys.kind = MessageType::System;
+        s.sequence_and_append(&mut sys).unwrap();
+        let mut theirs = msg_from(&owner, "bob", "for you");
+        s.sequence_and_append(&mut theirs).unwrap();
+        let d = lease(&s, 0).unwrap();
+        assert_eq!(d.seq, theirs.seq);
+        // The two before it were never owed.
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), sys.seq);
+    }
+
+    #[test]
+    fn peek_shows_what_is_owed_without_taking_it() {
+        let (s, seqs) = owed(3);
+        let d = lease(&s, 0).unwrap();
+        s.delivery_settle(
+            d.token.as_deref().unwrap(),
+            &Settle::Nack { retry_at: at(100) },
+            &at(1),
+            5,
+        )
+        .unwrap();
+        let peeked: Vec<u64> = s
+            .delivery_peek("r_test", "haris", &at(2), 10)
+            .unwrap()
+            .iter()
+            .map(|m| m.seq)
+            .collect();
+        assert_eq!(peeked, vec![seqs[1], seqs[2]], "the delayed one is not due");
+        let later: Vec<u64> = s
+            .delivery_peek("r_test", "haris", &at(100), 10)
+            .unwrap()
+            .iter()
+            .map(|m| m.seq)
+            .collect();
+        assert_eq!(later, seqs);
+        // Peeking took nothing.
+        assert_eq!(lease(&s, 100).unwrap().seq, seqs[0]);
+    }
+
+    #[test]
+    fn read_and_ack_settles_exactly_what_was_read() {
+        let (s, seqs) = owed(3);
+        s.delivery_ack_seqs("r_test", "haris", &[seqs[1]], &at(0))
+            .unwrap();
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), 0);
+        s.delivery_ack_seqs("r_test", "haris", &[seqs[0]], &at(0))
+            .unwrap();
+        assert_eq!(s.bookmark("r_test", "haris").unwrap(), seqs[1]);
+        assert_eq!(lease(&s, 0).unwrap().seq, seqs[2]);
+    }
+
+    #[test]
+    fn a_crash_after_the_lease_is_written_hands_it_out_again_later() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let path = temp_db("lease");
+        let seq = {
+            let s = Store::open_with_key(&path, None).unwrap();
+            s.create_room(&room(&owner)).unwrap();
+            let mut m = msg_from(&owner, "bob", "work");
+            s.sequence_and_append(&mut m).unwrap();
+            // Leased and committed; the answer never reached the reader.
+            lease(&s, 0).unwrap();
+            m.seq
+        };
+        let s = Store::open_with_key(&path, None).unwrap();
+        assert!(lease(&s, 10).is_none(), "the lease survived the restart");
+        let again = lease(&s, 600).unwrap();
+        assert_eq!((again.seq, again.attempt), (seq, 2));
+        // A lease write that fails leaves nothing behind.
+        s.faults.arm("delivery.lease");
+        assert!(s
+            .delivery_lease("r_test", "haris", &at(1300), &at(1900), 5)
+            .is_err());
+        let d = s.deliveries("r_test", Some("haris")).unwrap();
+        assert_eq!(d[0].attempt, 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

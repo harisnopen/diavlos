@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use diavlos_client::proto::{
-    AskResult, CheckApproveResult, DraftWire, ExportResult, InviteResult, JoinResult, OutboxItem,
-    ReadResult, Request, RotateResult, SendResult, StatusResult, WhoEntry,
+    AskResult, CheckApproveResult, DeliveryItem, DraftWire, ExportResult, InviteResult, JoinResult,
+    NextResult, OutboxItem, ReadResult, Request, RotateResult, SendResult, StatusResult, WhoEntry,
 };
 use diavlos_client::{Client, Paths};
 use diavlos_core::{ControlOp, DataClass, Error, Message, MessageType, Role};
@@ -127,22 +127,67 @@ enum Cmd {
         json: bool,
     },
     /// Wait for the next message from someone else. Skips your own and
-    /// helper notices.
+    /// helper notices. Acks it once printed: that is receipt, not "your
+    /// script finished". For that, use --manual-ack and `diavlos ack`.
     Next {
         room: String,
         /// Give up after this many seconds (exit code 4). Default: wait.
         #[arg(long)]
         timeout: Option<u64>,
+        /// Do not ack. Prints a token; the message stays yours until you
+        /// `diavlos ack` it, `nack` it, or the lease runs out, and is then
+        /// handed out again.
+        #[arg(long)]
+        manual_ack: bool,
+        /// How long it stays yours, in seconds. Default 600.
+        #[arg(long)]
+        lease: Option<u64>,
         #[arg(long)]
         json: bool,
     },
-    /// Read from your bookmark onward. Never deletes.
+    /// Look at messages from your bookmark onward. Never deletes and
+    /// moves nothing, unless --ack.
     Read {
         room: String,
         #[arg(long)]
         since: Option<u64>,
         #[arg(long, default_value_t = 50)]
         limit: u32,
+        /// Settle what this prints as taken on.
+        #[arg(long)]
+        ack: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Settle a message from `next --manual-ack`: taken on. Not "finished":
+    /// say `done` in the room for that.
+    Ack {
+        token: String,
+    },
+    /// Still working on it: keep it yours longer.
+    Renew {
+        token: String,
+        /// Seconds from now. Default 600.
+        #[arg(long)]
+        lease: Option<u64>,
+    },
+    /// Not now: hand it out again later.
+    Nack {
+        token: String,
+        /// Seconds until it is handed out again.
+        #[arg(long = "retry-in", default_value_t = 60)]
+        retry_in: u64,
+    },
+    /// Messages handed out and not simply done: leased, delayed, and
+    /// quarantined after being handed out too many times.
+    Deliveries {
+        room: String,
+        /// Every key on this helper, not only --as.
+        #[arg(long)]
+        all: bool,
+        /// Bring this quarantined message (seq) back to be handed out again.
+        #[arg(long, value_name = "SEQ")]
+        replay: Option<u64>,
         #[arg(long)]
         json: bool,
     },
@@ -740,23 +785,54 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
         Cmd::Next {
             room,
             timeout,
+            manual_ack,
+            lease,
             json,
         } => {
             let v = client
                 .call(&Request::Next {
                     room,
-                    identity,
+                    identity: identity.clone(),
                     timeout_secs: timeout.unwrap_or(0),
+                    manual_ack: true,
+                    lease_secs: lease,
                 })
                 .await?;
-            let m: Message = serde_json::from_value(v)?;
-            print_message(&m, json)?;
+            let r: NextResult = serde_json::from_value(v)?;
+            if manual_ack {
+                if json {
+                    println!("{}", serde_json::to_string(&r)?);
+                } else {
+                    print_message(&r.message, false)?;
+                    println!(
+                        "  token {} (yours until {}, attempt {}): diavlos ack {}",
+                        r.delivery.token,
+                        r.delivery.lease_until,
+                        r.delivery.attempt,
+                        r.delivery.token
+                    );
+                }
+                return Ok(0);
+            }
+            print_message(&r.message, json)?;
+            // Printed: that is receipt. If the ack does not land, the
+            // message is handed out again once the lease runs out.
+            if let Err(e) = client
+                .call(&Request::Ack {
+                    identity,
+                    token: r.delivery.token,
+                })
+                .await
+            {
+                eprintln!("warning: could not ack it ({e}); it will be handed out again");
+            }
             Ok(0)
         }
         Cmd::Read {
             room,
             since,
             limit,
+            ack,
             json,
         } => {
             let v = client
@@ -765,6 +841,7 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                     identity,
                     since,
                     limit,
+                    ack,
                 })
                 .await?;
             let r: ReadResult = serde_json::from_value(v)?;
@@ -773,18 +850,114 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             }
             Ok(0)
         }
+        Cmd::Ack { token } => {
+            client.call(&Request::Ack { identity, token }).await?;
+            println!("acked");
+            Ok(0)
+        }
+        Cmd::Renew { token, lease } => {
+            let v = client
+                .call(&Request::Renew {
+                    identity,
+                    token,
+                    lease_secs: lease,
+                })
+                .await?;
+            println!(
+                "yours until {}",
+                v["lease_until"].as_str().unwrap_or("later")
+            );
+            Ok(0)
+        }
+        Cmd::Nack { token, retry_in } => {
+            let v = client
+                .call(&Request::Nack {
+                    identity,
+                    token,
+                    retry_in_secs: Some(retry_in),
+                })
+                .await?;
+            match v["state"].as_str() {
+                Some("quarantined") => println!(
+                    "handed back, and quarantined: it has been handed out too many times. \
+                     `diavlos deliveries <room>` lists it"
+                ),
+                _ => println!(
+                    "handed back; it comes round again at {}",
+                    v["retry_at"].as_str().unwrap_or("?")
+                ),
+            }
+            Ok(0)
+        }
+        Cmd::Deliveries {
+            room,
+            all,
+            replay,
+            json,
+        } => {
+            if let Some(seq) = replay {
+                client
+                    .call(&Request::Replay {
+                        room,
+                        identity,
+                        seq,
+                    })
+                    .await?;
+                println!("message {seq} will be handed out again next");
+                return Ok(0);
+            }
+            let v = client
+                .call(&Request::Deliveries {
+                    room,
+                    identity,
+                    all,
+                })
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(0);
+            }
+            let items: Vec<DeliveryItem> = serde_json::from_value(v)?;
+            if items.is_empty() {
+                println!("nothing handed out and waiting");
+            }
+            for d in items {
+                let when = match d.state.as_str() {
+                    "leased" => format!(" until {}", d.lease_until.unwrap_or_default()),
+                    "delayed" => format!(" until {}", d.retry_at.unwrap_or_default()),
+                    _ => String::new(),
+                };
+                println!(
+                    "[{}] {} ({}) to {}: {}{}, handed out {} time{}\n    {}",
+                    d.seq,
+                    d.from,
+                    d.kind.map(|k| k.as_str()).unwrap_or("?"),
+                    d.reader,
+                    d.state,
+                    when,
+                    d.attempt,
+                    if d.attempt == 1 { "" } else { "s" },
+                    d.text
+                );
+            }
+            Ok(0)
+        }
         Cmd::Watch { room, exec, json } => {
             let mut stream = client
                 .stream(&Request::Watch {
                     room: room.clone(),
-                    identity,
+                    identity: identity.clone(),
+                    manual_ack: true,
                 })
                 .await?;
             while let Some(v) = stream.next().await? {
                 let m: Message = serde_json::from_value(v["message"].clone())?;
+                let token = v["delivery"]["token"].as_str().unwrap_or("").to_string();
                 print_message(&m, json)?;
+                let mut handled = true;
                 if let Some(script) = &exec {
                     let status = std::process::Command::new(script)
+                        .env("DIAVLOS_TOKEN", &token)
                         .env("DIAVLOS_MESSAGE", serde_json::to_string(&m)?)
                         .env("DIAVLOS_ROOM", &room)
                         .env("DIAVLOS_ID", &m.id)
@@ -800,12 +973,33 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                         .env("DIAVLOS_REPLY_TO", m.reply_to.clone().unwrap_or_default())
                         .env("DIAVLOS_TRACE", m.trace.clone().unwrap_or_default())
                         .status();
-                    match status {
-                        Ok(s) if s.success() => {}
-                        Ok(s) => eprintln!("script exited with {s} for {}", m.id),
-                        Err(e) => eprintln!("could not run {script}: {e}"),
-                    }
+                    handled = match status {
+                        Ok(s) if s.success() => true,
+                        Ok(s) => {
+                            eprintln!("script exited with {s} for {}; handing it back", m.id);
+                            false
+                        }
+                        Err(e) => {
+                            eprintln!("could not run {script}: {e}; handing it back");
+                            false
+                        }
+                    };
                 }
+                // Ack once handled; a failed script hands it back, and after
+                // too many tries it is quarantined, never dropped.
+                let settle = if handled {
+                    Request::Ack {
+                        identity: identity.clone(),
+                        token,
+                    }
+                } else {
+                    Request::Nack {
+                        identity: identity.clone(),
+                        token,
+                        retry_in_secs: Some(30),
+                    }
+                };
+                client.call(&settle).await?;
             }
             Ok(0)
         }
@@ -1136,6 +1330,7 @@ matches `diavlos who`, or pass --owner."
                     (r.queued, "queued"),
                     (r.failed, "failed"),
                     (r.quarantined, "quarantined"),
+                    (r.quarantined_deliveries, "undeliverable"),
                 ] {
                     if n > 0 {
                         outbox.push_str(&format!(", {n} {what}"));
@@ -1154,6 +1349,9 @@ matches `diavlos who`, or pass --owner."
                 );
                 if r.failed + r.quarantined > 0 {
                     println!("  {:<20} see: diavlos outbox {}", "", r.name);
+                }
+                if r.quarantined_deliveries > 0 {
+                    println!("  {:<20} see: diavlos deliveries {} --all", "", r.name);
                 }
             }
             Ok(0)
@@ -1247,13 +1445,15 @@ async fn hook_run(
         return Ok(0);
     }
 
-    // Read from the bookmark without waiting. A hook must never hold up a
-    // turn, so any failure here is silence, not an error.
+    // Look at what is owed without taking it, and without waiting. Showing
+    // a message is not the agent accepting it: it stays owed, and this
+    // reminder comes back, until the agent takes it with diavlos_next and
+    // acks it. A hook must never hold up a turn, so any failure here is
+    // silence, not an error. Own messages and housekeeping are never owed.
     let v = match client
-        .call(&Request::Read {
+        .call(&Request::Peek {
             room: room.to_string(),
             identity: identity.to_string(),
-            since: None,
             limit: 20,
         })
         .await
@@ -1261,17 +1461,10 @@ async fn hook_run(
         Ok(v) => v,
         Err(_) => return Ok(0),
     };
-    let Ok(r) = serde_json::from_value::<ReadResult>(v) else {
+    let Ok(owed) = serde_json::from_value::<Vec<Message>>(v) else {
         return Ok(0);
     };
-    // Skip our own messages and the helper's notices: an agent does not
-    // need waking for what it just said.
-    let mine: Vec<Message> = r
-        .messages
-        .into_iter()
-        .filter(|m| m.from != identity && m.kind != MessageType::System)
-        .collect();
-    if let Some(out) = hook::decide(&mine, stop_hook_active, session_start) {
+    if let Some(out) = hook::decide(&owed, stop_hook_active, session_start) {
         println!("{out}");
     }
     Ok(0)
@@ -1402,7 +1595,9 @@ fn mcp_install(
         if keys.len() > 1 {
             println!("\nThe same for {}.", keys[1..].join(", "));
         }
-        println!("\nThen restart the tool: diavlos_send, diavlos_next, diavlos_ask and five more.");
+        println!(
+            "\nThen restart the tool: diavlos_send, diavlos_next, diavlos_ask and eight more."
+        );
     }
     Ok(0)
 }

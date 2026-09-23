@@ -513,7 +513,13 @@ pub async fn run(
             channel.clone(),
         );
         async move {
-            let mut stream = client.stream(&Request::Watch { room, identity }).await?;
+            let mut stream = client
+                .stream(&Request::Watch {
+                    room,
+                    identity: identity.clone(),
+                    manual_ack: true,
+                })
+                .await?;
             while let Some(v) = stream.next().await? {
                 let m: Message = serde_json::from_value(v["message"].clone())?;
                 let mut session = load_session(&paths);
@@ -532,19 +538,24 @@ pub async fn run(
                     .send()
                     .await?;
                 let body: Value = r.json().await.unwrap_or(Value::Null);
-                match body["id"].as_str() {
+                let posted = match body["id"].as_str() {
                     Some(id) => {
                         let mut o = ours.lock().await;
                         o.push_back(id.to_string());
                         while o.len() > OWN_IDS {
                             o.pop_front();
                         }
+                        true
                     }
-                    None => eprintln!(
-                        "teams: {}",
-                        body["error"]["message"].as_str().unwrap_or("post failed")
-                    ),
-                }
+                    None => {
+                        eprintln!(
+                            "teams: {}",
+                            body["error"]["message"].as_str().unwrap_or("post failed")
+                        );
+                        false
+                    }
+                };
+                super::settle(&client, &identity, &v, posted).await;
             }
             anyhow::Ok(())
         }

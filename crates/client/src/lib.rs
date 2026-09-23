@@ -1,8 +1,8 @@
 //! The Diavlos library. For agents you build yourself.
 //!
-//! Same eight calls as the MCP tools: send, ask, next, read, claim,
-//! release, who, rooms. Everything goes through the local helper, which
-//! is started on first use.
+//! The same calls as the MCP tools: send, ask, next (and take, ack, renew,
+//! nack), read, claim, release, who, rooms. Everything goes through the
+//! local helper, which is started on first use.
 //!
 //! ```no_run
 //! # async fn demo() -> diavlos_core::Result<()> {
@@ -26,7 +26,9 @@ pub use client::Client;
 pub use paths::Paths;
 
 use diavlos_core::{Message, MessageType, Result};
-use proto::{DraftWire, JoinResult, ReadResult, Request, RoomStatus, SendResult, WhoEntry};
+use proto::{
+    DraftWire, JoinResult, NextResult, ReadResult, Request, RoomStatus, SendResult, WhoEntry,
+};
 
 /// Options for `send`.
 #[derive(Debug, Clone, Default)]
@@ -152,6 +154,10 @@ impl Room {
     }
 
     /// Wait for the next message from someone else. `0` waits forever.
+    ///
+    /// Acked as soon as it is handed over: if this process dies before it
+    /// has dealt with the message, the message is not handed out again.
+    /// For at-least-once, use [`Room::take`] and [`Room::ack`].
     pub async fn next(&self, timeout_secs: u64) -> Result<Message> {
         let v = self
             .client
@@ -159,13 +165,67 @@ impl Room {
                 room: self.room.clone(),
                 identity: self.identity.clone(),
                 timeout_secs,
+                manual_ack: false,
+                lease_secs: None,
             })
             .await?;
         Ok(serde_json::from_value(v)?)
     }
 
-    /// Read from your bookmark onward. Never deletes. With `since`, read
-    /// from that seq instead and leave the bookmark alone.
+    /// Wait for the next message from someone else and hold it: it stays
+    /// yours until you [`ack`](Room::ack), [`nack`](Room::nack) or the lease
+    /// runs out, and is then handed out again. `0` waits forever.
+    pub async fn take(&self, timeout_secs: u64, lease_secs: Option<u64>) -> Result<NextResult> {
+        let v = self
+            .client
+            .call(&Request::Next {
+                room: self.room.clone(),
+                identity: self.identity.clone(),
+                timeout_secs,
+                manual_ack: true,
+                lease_secs,
+            })
+            .await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// Taken on. Not "finished": say `done` in the room for that.
+    pub async fn ack(&self, token: &str) -> Result<()> {
+        self.client
+            .call(&Request::Ack {
+                identity: self.identity.clone(),
+                token: token.to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Still working: keep it yours for `lease_secs` more.
+    pub async fn renew(&self, token: &str, lease_secs: Option<u64>) -> Result<()> {
+        self.client
+            .call(&Request::Renew {
+                identity: self.identity.clone(),
+                token: token.to_string(),
+                lease_secs,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Not now: hand it out again after `retry_in_secs`.
+    pub async fn nack(&self, token: &str, retry_in_secs: Option<u64>) -> Result<()> {
+        self.client
+            .call(&Request::Nack {
+                identity: self.identity.clone(),
+                token: token.to_string(),
+                retry_in_secs,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Look at messages from your bookmark onward, or from `since`. Never
+    /// deletes and moves nothing.
     pub async fn read(&self, since: Option<u64>, limit: u32) -> Result<Vec<Message>> {
         let v = self
             .client
@@ -174,6 +234,7 @@ impl Room {
                 identity: self.identity.clone(),
                 since,
                 limit,
+                ack: false,
             })
             .await?;
         let r: ReadResult = serde_json::from_value(v)?;

@@ -31,7 +31,9 @@ pub use limits::Limits;
 pub use message::{Action, AgentInfo, DataClass, Draft, Message, MessageType};
 pub use policy::{DefaultHook, Policy, PolicyHook};
 pub use room::{Member, Role, Room};
-pub use store::{LocalMember, OutboxCounts, OutboxEntry, OutboxState, Store};
+pub use store::{
+    Delivery, DeliveryState, LocalMember, OutboxCounts, OutboxEntry, OutboxState, Settle, Store,
+};
 
 /// Version of this crate, for the version handshake.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

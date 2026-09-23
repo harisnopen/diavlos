@@ -1,6 +1,12 @@
 // Diavlos: the channel between AI agents. Node binding.
-// Same eight calls as the MCP tools: send, ask, next, read, claim, release,
-// who, rooms. Talks to the local helper; starts it if needed.
+// The same calls as the MCP tools: send, ask, next, read, claim, release,
+// who, rooms, and ack, renew and nack for messages you hold. Talks to the
+// local helper; starts it if needed.
+//
+// Messages from messages() and watch() are held for you: each stays yours
+// until acknowledged, and comes round again if it never is. Both loops
+// acknowledge a message when you ask for the next one. If you break out of
+// a loop after finishing a message, call room.ack(msg) first.
 'use strict';
 const net = require('net');
 const os = require('os');
@@ -140,18 +146,48 @@ class Room {
     const r = await call(this.home, 'ask', { room: this.room, identity: this.identity, draft, timeout_secs: opts.timeout === undefined ? 120 : opts.timeout });
     return r.reply;
   }
-  next(timeout) {
-    return call(this.home, 'next', { room: this.room, identity: this.identity, timeout_secs: timeout || 0 });
+  // The next message from someone else. With { ack: false } it stays yours
+  // until ack/nack or the lease ({ lease } seconds, default 600) runs out;
+  // msg.delivery holds the token.
+  async next(timeout, opts) {
+    opts = opts || {};
+    const manual = opts.ack === false;
+    const r = await call(this.home, 'next', { room: this.room, identity: this.identity, timeout_secs: timeout || 0, manual_ack: manual, lease_secs: opts.lease === undefined ? null : opts.lease });
+    if (!manual) return r;
+    return Object.assign(r.message, { delivery: r.delivery });
   }
-  async *messages(timeout) { for (;;) yield await this.next(timeout); }
-  async read(since, limit) {
-    const r = await call(this.home, 'read', { room: this.room, identity: this.identity, since: since === undefined ? null : since, limit: limit || 50 });
+  async *messages(timeout) {
+    for (;;) {
+      const msg = await this.next(timeout, { ack: false });
+      yield msg;
+      await this.ack(msg);
+    }
+  }
+  // Taken on. Not "finished": say done in the room for that.
+  ack(msg) { return call(this.home, 'ack', { identity: this.identity, token: token(msg) }); }
+  renew(msg, lease) { return call(this.home, 'renew', { identity: this.identity, token: token(msg), lease_secs: lease === undefined ? null : lease }); }
+  nack(msg, retryIn) { return call(this.home, 'nack', { identity: this.identity, token: token(msg), retry_in_secs: retryIn === undefined ? 60 : retryIn }); }
+  // Look only: moves nothing unless ack is true.
+  async read(since, limit, ack) {
+    const r = await call(this.home, 'read', { room: this.room, identity: this.identity, since: since === undefined ? null : since, limit: limit || 50, ack: !!ack });
     return r.messages;
   }
   async claim(taskId) { return (await call(this.home, 'claim', { room: this.room, identity: this.identity, task_id: taskId })).message; }
   async release(taskId) { return (await call(this.home, 'release', { room: this.room, identity: this.identity, task_id: taskId })).message; }
   who() { return call(this.home, 'who', { room: this.room }); }
-  async *watch() { for await (const item of stream(this.home, 'watch', { room: this.room, identity: this.identity })) yield item.message; }
+  async *watch() {
+    for await (const item of stream(this.home, 'watch', { room: this.room, identity: this.identity, manual_ack: true })) {
+      const msg = Object.assign(item.message, { delivery: item.delivery });
+      yield msg;
+      await this.ack(msg);
+    }
+  }
+}
+
+function token(msg) {
+  if (typeof msg === 'string') return msg;
+  if (msg && msg.delivery && msg.delivery.token) return msg.delivery.token;
+  throw new DiavlosError(1, 'that message was not held for you: take it with next(t, { ack: false }), messages() or watch()');
 }
 
 function rooms(home) { return call(home || defaultHome(), 'rooms', {}); }

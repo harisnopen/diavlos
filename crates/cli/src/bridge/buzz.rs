@@ -264,7 +264,13 @@ pub async fn run(
         let keys = keys.clone();
         let out_tx = out_tx.clone();
         async move {
-            let mut stream = client.stream(&Request::Watch { room, identity }).await?;
+            let mut stream = client
+                .stream(&Request::Watch {
+                    room,
+                    identity: identity.clone(),
+                    manual_ack: true,
+                })
+                .await?;
             while let Some(v) = stream.next().await? {
                 let m: Message = serde_json::from_value(v["message"].clone())?;
                 let ev = EventBuilder::new(Kind::Custom(KIND_CHAT), format_for_buzz(&m))
@@ -273,8 +279,10 @@ pub async fn run(
                     .context("sign the Buzz event")?;
                 let frame = json!(["EVENT", serde_json::from_str::<Value>(&ev.as_json())?]);
                 if out_tx.send(frame.to_string()).await.is_err() {
+                    // Not sent: the lease runs out and it is handed out again.
                     break;
                 }
+                super::settle(&client, &identity, &v, true).await;
             }
             anyhow::Ok(())
         }

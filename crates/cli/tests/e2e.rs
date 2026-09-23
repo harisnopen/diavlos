@@ -200,22 +200,81 @@ fn two_helpers_trade_messages_and_nothing_is_lost() {
 }
 
 #[test]
-fn a_look_back_read_leaves_the_bookmark_alone() {
+fn reading_only_looks_unless_asked_to_ack() {
     let a = Home::new("bm", "haris");
     a.ok(&["new", "ops", "--about", "test"]);
     a.ok(&["send", "ops", "one"]);
-    // A plain read moves the bookmark to the end.
+    // A plain read is a pure view: read twice, see the same.
     let first = a.ok(&["read", "ops", "--json"]);
     assert!(first.contains("\"one\""), "{first}");
+    let again = a.ok(&["read", "ops", "--json"]);
+    assert_eq!(first, again);
+    // --ack settles exactly what it printed, and the bookmark moves.
+    let acked = a.ok(&["read", "ops", "--ack", "--json"]);
+    assert!(acked.contains("\"one\""), "{acked}");
     a.ok(&["send", "ops", "two"]);
 
     // Reading from seq 1, as the web page does, is only a look back.
     let all = a.ok(&["read", "ops", "--since", "1", "--json"]);
     assert!(all.contains("\"one\"") && all.contains("\"two\""), "{all}");
 
-    // So the next plain read still gets "two", and only "two".
+    // So the next plain read gets "two", and only "two".
     let next = a.ok(&["read", "ops", "--json"]);
     assert!(next.contains("\"two\""), "{next}");
     assert!(!next.contains("\"one\""), "{next}");
+    a.ok(&["stop"]);
+}
+
+#[test]
+fn a_message_taken_and_not_acked_comes_back() {
+    let a = Home::new("lease", "haris");
+    a.ok(&["new", "ops", "--about", "test"]);
+    let inv = invite_token(&a.ok(&["invite", "ops", "worker"]));
+    a.ok(&["--as", "worker", "join", &inv]);
+    a.ok(&["send", "ops", "fix the build", "--type", "task"]);
+
+    // Taken with a short lease, and the worker "dies" without acking.
+    let took = a.ok(&[
+        "--as",
+        "worker",
+        "next",
+        "ops",
+        "--manual-ack",
+        "--lease",
+        "2",
+        "--json",
+    ]);
+    let first: serde_json::Value = serde_json::from_str(took.trim()).unwrap();
+    assert_eq!(first["message"]["text"], "fix the build");
+    assert_eq!(first["delivery"]["attempt"], 1);
+    let old_token = first["delivery"]["token"].as_str().unwrap().to_string();
+    // While the lease holds, nothing else is owed.
+    a.fails_with(&["--as", "worker", "next", "ops", "--timeout", "1"], 4);
+
+    // The lease runs out: the same message comes round again.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let again = a.ok(&[
+        "--as",
+        "worker",
+        "next",
+        "ops",
+        "--manual-ack",
+        "--json",
+        "--timeout",
+        "10",
+    ]);
+    let second: serde_json::Value = serde_json::from_str(again.trim()).unwrap();
+    assert_eq!(second["message"]["id"], first["message"]["id"]);
+    assert_eq!(second["delivery"]["attempt"], 2);
+
+    // The first worker wakes up late: its token no longer settles anything.
+    a.fails_with(&["--as", "worker", "ack", &old_token], 6);
+    let token = second["delivery"]["token"].as_str().unwrap();
+    // Nor can another key settle this one's delivery.
+    a.fails_with(&["ack", token], 6);
+    a.ok(&["--as", "worker", "ack", token]);
+    a.fails_with(&["--as", "worker", "next", "ops", "--timeout", "1"], 4);
+    let d = a.ok(&["--as", "worker", "deliveries", "ops"]);
+    assert!(d.contains("nothing handed out"), "{d}");
     a.ok(&["stop"]);
 }

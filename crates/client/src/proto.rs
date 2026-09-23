@@ -59,16 +59,71 @@ pub enum Request {
         identity: String,
         draft: DraftWire,
     },
+    /// Hand out the next message owed to this identity. With `manual_ack`
+    /// the answer is a [`NextResult`]: the message and a lease token, and
+    /// the message stays this reader's until it acks, nacks or the lease
+    /// runs out. Without it (older callers) the answer is the message
+    /// alone, acked as soon as it has been written to the socket.
     Next {
         room: String,
         identity: String,
         timeout_secs: u64,
+        #[serde(default)]
+        manual_ack: bool,
+        /// Seconds; default from config (600).
+        #[serde(default)]
+        lease_secs: Option<u64>,
     },
+    /// Look at messages from the bookmark (or from `since`). A pure view:
+    /// it moves nothing, unless `ack` settles exactly what it returned.
     Read {
         room: String,
         identity: String,
         since: Option<u64>,
         limit: u32,
+        #[serde(default)]
+        ack: bool,
+    },
+    /// Settle a delivery: taken on. Not "finished": that is a `done` in
+    /// the room.
+    Ack {
+        identity: String,
+        token: String,
+    },
+    /// Still working on it: keep it this reader's for longer.
+    Renew {
+        identity: String,
+        token: String,
+        #[serde(default)]
+        lease_secs: Option<u64>,
+    },
+    /// Not now: hand it out again after `retry_in_secs` (default 60).
+    Nack {
+        identity: String,
+        token: String,
+        #[serde(default)]
+        retry_in_secs: Option<u64>,
+    },
+    /// What is owed to this identity, without handing anything out. For
+    /// wake-up hooks.
+    Peek {
+        room: String,
+        identity: String,
+        limit: u32,
+    },
+    /// Messages handed out and not simply done: leased, delayed,
+    /// quarantined. For this identity, or all local ones with `all`.
+    Deliveries {
+        room: String,
+        identity: String,
+        #[serde(default)]
+        all: bool,
+    },
+    /// Bring a quarantined message back to be handed out again.
+    Replay {
+        room: String,
+        identity: String,
+        seq: u64,
     },
     /// Send a question and wait for a reply to that exact message.
     Ask {
@@ -130,10 +185,15 @@ pub enum Request {
     Events {
         follow: bool,
     },
-    /// Streaming: messages from the bookmark onward, then live.
+    /// Streaming: messages from the bookmark onward, then live. With
+    /// `manual_ack` each line carries a lease token and the next line
+    /// waits until that one is settled (or its lease runs out). Without
+    /// it (older callers) each is acked once written to the socket.
     Watch {
         room: String,
         identity: String,
+        #[serde(default)]
+        manual_ack: bool,
     },
     /// Who a local identity label is: its name, kind and key. Makes the key
     /// on first use, as every other request that names an identity does.
@@ -215,6 +275,10 @@ pub struct RoomStatus {
     pub messages: u64,
     /// Still to send: pending or waiting to try again.
     pub queued: u64,
+    /// Messages handed out too many times and never settled, for the
+    /// identities on this helper; see `diavlos deliveries`.
+    #[serde(default)]
+    pub quarantined_deliveries: u64,
     /// The home refused them for good; see `diavlos outbox`.
     #[serde(default)]
     pub failed: u64,
@@ -350,6 +414,45 @@ pub struct OutboxItem {
     pub reason_class: Option<String>,
     #[serde(default)]
     pub code: Option<i32>,
+}
+
+/// A message handed out to one reader, and how to settle it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryInfo {
+    /// Pass to ack, renew or nack. Replaced each time the message is
+    /// handed out, so a worker whose lease ran out cannot settle a newer
+    /// delivery.
+    pub token: String,
+    pub lease_until: String,
+    /// 1 the first time; more means it was handed out before and not
+    /// settled.
+    pub attempt: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NextResult {
+    pub message: Message,
+    pub delivery: DeliveryInfo,
+}
+
+/// One entry of `deliveries`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryItem {
+    pub seq: u64,
+    pub reader: String,
+    /// leased, delayed, quarantined or replay.
+    pub state: String,
+    pub attempt: u32,
+    #[serde(default)]
+    pub lease_until: Option<String>,
+    #[serde(default)]
+    pub retry_at: Option<String>,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub kind: Option<MessageType>,
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

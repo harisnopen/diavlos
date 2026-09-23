@@ -45,7 +45,22 @@ def main():
             if msg.type == "task":
                 done = room.send("did x", type="done", reply_to=msg.id)
                 assert done.reply_to == msg.id
+                room.ack(msg)  # breaking out: settle this one ourselves
                 break
+
+        # A message held and never acked comes round again.
+        cli(a, "send", "ops", "again?", "--type", "task")
+        held = room.next_one(timeout=20, ack=False, lease=1)
+        assert held.text == "again?" and held.delivery["attempt"] == 1, held
+        time.sleep(2)
+        back = room.next_one(timeout=20, ack=False)
+        assert back.id == held.id and back.delivery["attempt"] == 2, back
+        try:
+            room.ack(held)
+            raise SystemExit("expected the old token to be refused")
+        except DiavlosError as e:
+            assert e.code == 6, e
+        room.ack(back)
 
         who = room.who()
         assert {w["name"] for w in who} == {"haris", "pybot"}, who
