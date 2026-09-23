@@ -41,6 +41,21 @@ machine, and the commands to reproduce it.
 [The 115-second video](docs/use-cases/media/two-desktops.mp4) ·
 [transcript](docs/use-cases/media/transcript.txt)
 
+### Two E2B sandboxes, one human gate
+
+![Two E2B sandboxes in one room: a planner asks a runner to run a job, the runner asks a human first, the job runs after an approve and does not run after a deny](docs/use-cases/media/e2b-sandboxes.gif)
+
+Two real [E2B](https://e2b.dev) sandboxes join one room over the public
+internet. The planner in sandbox A asks the runner in sandbox B to run a
+job. The runner asks a human first. After an approve, the gate spends it at
+the room's home and the job runs. After a deny, nothing runs. Every message
+is signed and checked, and the audit bundle verifies.
+
+This is a replay of the real log from
+[GitHub run 35896619176](https://github.com/harisnopen/diavlos/actions/runs/35896619176).
+**[The example](examples/e2b-sandboxes/)** ·
+[the 31-second video](docs/use-cases/media/e2b-sandboxes.mp4)
+
 ## The seven promises
 
 1. **Any agent, any vendor.** Diavlos never favors one.
