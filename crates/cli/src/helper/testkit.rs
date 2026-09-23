@@ -190,10 +190,14 @@ impl Link for ScriptedLink {
 pub struct TempHome(pub PathBuf);
 
 impl TempHome {
+    /// A fresh directory. Tests run in parallel and some clocks (macOS) are
+    /// coarser than a nanosecond, so a counter keeps two names apart.
     pub fn new(tag: &str) -> TempHome {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "diavlos-kit-{tag}-{}-{}",
+            "diavlos-kit-{tag}-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
