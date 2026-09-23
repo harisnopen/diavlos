@@ -33,6 +33,7 @@ directories = "6"
 toml = "1"
 toml_edit = "0.25"
 iroh = "1.2"
+ipnet = "2"
 interprocess = { version = "2", features = ["tokio"] }
 rmcp = { version = "3", features = ["server", "transport-io", "macros"] }
 schemars = "1"

@@ -34,6 +34,9 @@ relay_urls = ["https://relay.example.com"]
 `public_relays = false` means nothing ever goes to n0's servers, including
 address lookups.
 
+Already on a VPN like Tailscale or WireGuard? You may not need a relay at
+all: see [PRIVATE-NETWORKS.md](PRIVATE-NETWORKS.md).
+
 ## Relay access control
 
 A private relay should serve only your nodes. iroh-relay takes an access

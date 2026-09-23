@@ -1100,6 +1100,7 @@ dependencies = [
  "fs4",
  "futures",
  "interprocess",
+ "ipnet",
  "iroh",
  "keyring",
  "libc",

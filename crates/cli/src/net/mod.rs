@@ -5,6 +5,7 @@
 //! implementing [`Transport`] and [`Link`] again; nothing else changes.
 
 pub mod iroh;
+pub mod private;
 
 use std::sync::Arc;
 
