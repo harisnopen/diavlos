@@ -1,0 +1,57 @@
+name: e2b demo
+
+# Runs examples/e2b-sandboxes for real: two E2B sandboxes, one room made
+# on this runner. The human approve is automatic here (no one is at a
+# keyboard), then a second run denies, to show the gate holds. It costs
+# E2B credits and uses a secret, so it only runs when started by hand,
+# never on a pull request.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2b-demo
+  cancel-in-progress: false
+
+jobs:
+  e2b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A repository secret, never a variable: anyone who can read the
+    # repository can read a variable.
+    env:
+      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+    steps:
+      - name: Key present
+        run: |
+          if [ -z "$E2B_API_KEY" ]; then echo "add E2B_API_KEY as a repository secret"; exit 1; fi
+          echo "::add-mask::$E2B_API_KEY"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Build diavlos
+        run: |
+          cargo build --release -p diavlos
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+      - name: Python deps
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q -r examples/e2b-sandboxes/requirements.txt
+          /tmp/venv/bin/pip install -q -e "bindings/python[verify]"
+      - name: Build the E2B template
+        working-directory: examples/e2b-sandboxes
+        run: /tmp/venv/bin/python template.py
+      - name: Run, human approves
+        working-directory: examples/e2b-sandboxes
+        env:
+          DIAVLOS_HOME: /tmp/dvh-approve
+        run: mkdir -p "$DIAVLOS_HOME" && /tmp/venv/bin/python run.py --auto-approve
+      - name: Run, human denies
+        working-directory: examples/e2b-sandboxes
+        env:
+          DIAVLOS_HOME: /tmp/dvh-deny
+        run: mkdir -p "$DIAVLOS_HOME" && /tmp/venv/bin/python run.py --deny
