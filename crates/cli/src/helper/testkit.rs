@@ -186,8 +186,9 @@ impl Link for ScriptedLink {
     }
 }
 
-/// A temp directory removed when the test ends.
-pub struct TempHome(pub PathBuf);
+/// A temp directory removed when the test ends, and the inbox key for the
+/// store in it: random, and the same each time the store is opened again.
+pub struct TempHome(pub PathBuf, [u8; 32]);
 
 impl TempHome {
     /// A fresh directory. Tests run in parallel and some clocks (macOS) are
@@ -204,7 +205,7 @@ impl TempHome {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        TempHome(dir)
+        TempHome(dir, rand::random())
     }
 }
 
@@ -223,7 +224,7 @@ pub fn helper(node: &str, home: &TempHome, config: Option<Config>) -> Arc<Helper
     paths.ensure().unwrap();
     let mut config = config.unwrap_or_default();
     config.helper.keychain = false;
-    let store = Store::open_with_key(&paths.db(), Some([9u8; 32])).unwrap();
+    let store = Store::open_with_key(&paths.db(), Some(home.1)).unwrap();
     let (shutdown, _) = watch::channel(false);
     let (notify, _) = broadcast::channel(1024);
     let (events, _) = broadcast::channel(1024);

@@ -2646,7 +2646,7 @@ mod tests {
     #[test]
     fn queued_messages_are_sealed_and_old_plain_ones_get_sealed_too() {
         let owner = Identity::generate("haris", Kind::Human);
-        let key = [7u8; 32];
+        let key: [u8; 32] = rand::random();
         let canary = "CANARY-4f1b9e-queued-text";
         let path = temp_db("seal");
 
@@ -2713,7 +2713,7 @@ mod tests {
     #[test]
     fn a_full_disk_refuses_the_message_and_leaves_nothing_half_written() {
         let owner = Identity::generate("haris", Kind::Human);
-        let s = Store::open_memory_with_key([3u8; 32]).unwrap();
+        let s = Store::open_memory_with_key(rand::random()).unwrap();
         s.create_room(&room(&owner)).unwrap();
         s.cap_size_for_test(4).unwrap();
         let big = "x".repeat(3000);
