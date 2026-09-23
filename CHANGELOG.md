@@ -105,6 +105,11 @@ imply a change to the wire.
   status result has `approval_risks`, the check-approve result `risk`.
 - [docs/APPROVALS.md](docs/APPROVALS.md): how to keep the room's home, its
   owner key and the approver keys on a machine the agents cannot reach.
+- `next` and `read` show a question's action and id under its text, so a
+  person approving from the command line sees what the approve signs and
+  what to pass to `--reply-to`.
+- `invite` for an agent prints `diavlos --as <name> join ...`. A plain
+  `join` joins as `default`, the person's key, which MCP will not run as.
 
 ## [1.1.0] — 2026-09-23
 

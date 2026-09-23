@@ -631,7 +631,13 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                 .await?;
             let r: InviteResult = serde_json::from_value(v)?;
             println!("Paste this into {}'s session:\n", r.name);
-            println!("    diavlos join {}\n", r.invite);
+            // An agent joins as its own key. A plain `join` would join as
+            // `default`, the person's key, which MCP will not run as.
+            if human {
+                println!("    diavlos join {}\n", r.invite);
+            } else {
+                println!("    diavlos --as {} join {}\n", r.name, r.invite);
+            }
             print!(
                 "This invite is for \"{}\" ({}), works once, and expires {}.",
                 r.name, r.role, r.expires
@@ -1646,6 +1652,12 @@ fn print_message(m: &Message, json: bool) -> Result<(), Error> {
         println!("{head}: (content removed)");
     } else {
         println!("{head}: {}", m.text);
+        // What an approve would sign, and the id to answer with: the text
+        // is only what the asker says it is.
+        if let Some(a) = &m.action {
+            println!("    action {}", serde_json::to_string(a)?);
+            println!("    id     {}", m.id);
+        }
     }
     Ok(())
 }

@@ -60,8 +60,9 @@ diavlos invite ops claude-code --for <AGENTS-NODE>
 diavlos invite ops deployer --for <AGENTS-NODE>
 ```
 
-**4. On the agents' machine**, join as those keys. Always use `--as` here: a
-plain `diavlos join` would join as `default`, which is a person's key.
+**4. On the agents' machine**, join as those keys, with the command each
+invite prints. It has `--as` in it: a plain `diavlos join` would join as
+`default`, which is a person's key.
 
 ```sh
 diavlos --as claude-code join <invite>
@@ -76,8 +77,18 @@ diavlos invite ops alice --human --for <LAPTOP-NODE>    # on the gate
 diavlos join <invite>                            # on your computer
 ```
 
-Approve from there, with `diavlos web` or
-`diavlos send ops --type approve --reply-to <question id>`.
+Approve from there. `diavlos next ops` shows each question, the exact action
+it asks you to approve, and its id:
+
+```text
+[9] claude-code (question): Deploy api-service v1.2 to prod?
+    action {"verb":"deploy","target":"api-service","params":{"env":"prod","version":"1.2"}}
+    id     m_01M3718M90Z2BCFYPR4VTW83X6
+```
+
+Read the action, not the question: the action is what the approve signs.
+Then `diavlos send ops --type approve --reply-to <id>`. Or approve in the
+browser with `diavlos web`.
 
 **6. The deploy script**, on the agents' machine, asks the gate to record the
 spend for this one run before it acts.

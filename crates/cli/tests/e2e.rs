@@ -285,7 +285,10 @@ fn an_approve_is_spent_once_at_the_home_whoever_asks() {
     let a = Home::new("spend-a", "haris");
     let b = Home::new("spend-b", "bobhost");
     a.ok(&["new", "ops"]);
-    let inv = invite_token(&a.ok(&["invite", "ops", "bob"]));
+    let note = a.ok(&["invite", "ops", "bob"]);
+    // An agent is told to join as its own key, never as `default`.
+    assert!(note.contains("diavlos --as bob join dv1."), "{note}");
+    let inv = invite_token(&note);
     b.ok(&["--as", "fixer", "join", &inv]);
 
     let action = r#"{"verb":"deploy","target":"api","params":{"version":"2"}}"#;
@@ -308,6 +311,20 @@ fn an_approve_is_spent_once_at_the_home_whoever_asks() {
         .unwrap();
     let q = a.ok(&["next", "ops", "--timeout", "20", "--json"]);
     let q: serde_json::Value = serde_json::from_str(q.trim()).unwrap();
+    // A person reading it sees what an approve would sign, and its id.
+    let shown = a.ok(&[
+        "read",
+        "ops",
+        "--since",
+        &q["seq"].to_string(),
+        "--limit",
+        "1",
+    ]);
+    assert!(
+        shown.contains(r#"    action {"verb":"deploy","target":"api","params":{"version":"2"}}"#)
+            && shown.contains(&format!("    id     {}", q["id"].as_str().unwrap())),
+        "{shown}"
+    );
     a.ok(&[
         "send",
         "ops",
