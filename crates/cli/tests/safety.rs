@@ -320,3 +320,37 @@ fn mcp_refuses_a_human_key_whatever_it_is_called() {
     let (is_error, body) = mcp.tool("diavlos_rooms", json!({}));
     assert!(!is_error, "{body}");
 }
+
+/// A key inside an action's params used to pass the secret scan and be
+/// signed and replicated. The whole payload is scanned now.
+#[test]
+fn a_secret_inside_an_action_is_refused() {
+    let h = Home::new("scan");
+    h.room_with_agent("ops");
+    let key = "AKIAIOSFODNN7EXAMPLE";
+    let action = format!(r#"{{"verb":"deploy","target":"prod","params":{{"aws_key":"{key}"}}}}"#);
+
+    let out = h.run(
+        AGENT,
+        &[
+            "ask",
+            "ops",
+            "deploy?",
+            "--action",
+            &action,
+            "--timeout",
+            "3",
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(6),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("AWS access key"));
+
+    // Nothing carrying it was stored.
+    let log = h.ok("default", &["read", "ops", "--since", "1", "--json"]);
+    assert!(!log.contains(key), "the key reached the room:\n{log}");
+}

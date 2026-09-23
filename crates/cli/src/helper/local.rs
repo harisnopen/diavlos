@@ -605,14 +605,19 @@ async fn build(
 ) -> Result<Message> {
     let id = helper.identity(identity).await?;
     if helper.config.helper.secret_scan {
-        if let Some(hit) = secrets::scan_message(&draft.text, &draft.data) {
+        if let Some(hit) = secrets::scan_message(
+            &draft.text,
+            &draft.data,
+            draft.action.as_ref(),
+            draft.trace.as_deref(),
+        ) {
             helper.emit(
                 "secret_refused",
                 Some(&room.id),
                 serde_json::json!({"kind": hit}),
             );
             return Err(Error::Denied(format!(
-                "refused: that looks like a {hit}. Secrets never leave this machine. (secret_scan = false in config turns the scan off)"
+                "refused: that looks like a {hit}, so it was not sent. (secret_scan = false in config turns the scan off)"
             )));
         }
     }
