@@ -14,6 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use rusqlite_migration::{Migrations, M};
 
 use crate::error::{Error, Result};
+use crate::faults::Faults;
 use crate::invite::Invite;
 use crate::keys::{Kind, PublicKey};
 use crate::limits::Limits;
@@ -121,14 +122,46 @@ const MIGRATIONS: &[M<'static>] = &[
     CREATE INDEX messages_room_received ON messages(room_id, received);
     "#,
     ),
+    // The outbox keeps every message it accepted until the home has it in
+    // the chain or someone drops it on purpose. `sender` is the lane: one
+    // sender's stuck message holds back only that sender's later ones.
+    M::up(
+        r#"
+    ALTER TABLE outbox ADD COLUMN sender TEXT NOT NULL DEFAULT '';
+    ALTER TABLE outbox ADD COLUMN state TEXT NOT NULL DEFAULT 'pending';
+    ALTER TABLE outbox ADD COLUMN retry_at TEXT;
+    ALTER TABLE outbox ADD COLUMN reason_class TEXT;
+    ALTER TABLE outbox ADD COLUMN reason_code INTEGER;
+    ALTER TABLE outbox ADD COLUMN unknown_code INTEGER;
+    ALTER TABLE outbox ADD COLUMN unknown_since TEXT;
+    ALTER TABLE outbox ADD COLUMN unknown_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE outbox ADD COLUMN updated TEXT;
+    ALTER TABLE outbox ADD COLUMN sig TEXT;
+    UPDATE outbox SET
+      sender = CASE WHEN json_valid(message)
+        THEN COALESCE(json_extract(message, '$.from'), '') ELSE '' END,
+      sig = CASE WHEN json_valid(message) THEN json_extract(message, '$.sig') END;
+    CREATE INDEX outbox_room_state ON outbox(room_id, state, sender, created, msg_id);
+    CREATE TABLE meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    "#,
+    ),
 ];
+
+/// How many legacy outbox rows are sealed per transaction.
+const SEAL_BATCH: usize = 100;
 
 /// The store. Safe to share between threads; one connection, one lock.
 pub struct Store {
     conn: Mutex<Connection>,
-    /// When set, message content is encrypted at rest. Envelopes stay
-    /// plain: the chain is public inside the room anyway.
+    /// When set, message content and queued messages are encrypted at
+    /// rest. Envelopes stay plain: the chain is public inside the room
+    /// anyway.
     cipher: Option<XChaCha20Poly1305>,
+    /// Test-only failure points. Never armed in a real helper.
+    pub faults: Faults,
 }
 
 const ENC_PREFIX: &str = "enc1:";
@@ -147,6 +180,99 @@ pub struct LocalMember {
     pub identity: String,
 }
 
+/// Where a queued message stands. See the outbox section of `Store`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutboxState {
+    /// Queued; due now.
+    Pending,
+    /// Failed for a reason that can clear; due again at `retry_at`.
+    Waiting,
+    /// The home refused it for good.
+    Failed,
+    /// The same unknown answer kept coming back.
+    Quarantined,
+    /// Given up on, on purpose. Content wiped.
+    Dropped,
+}
+
+impl OutboxState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutboxState::Pending => "pending",
+            OutboxState::Waiting => "waiting",
+            OutboxState::Failed => "failed",
+            OutboxState::Quarantined => "quarantined",
+            OutboxState::Dropped => "dropped",
+        }
+    }
+}
+
+impl std::str::FromStr for OutboxState {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "pending" => OutboxState::Pending,
+            "waiting" => OutboxState::Waiting,
+            "failed" => OutboxState::Failed,
+            "quarantined" => OutboxState::Quarantined,
+            "dropped" => OutboxState::Dropped,
+            other => return Err(Error::Invalid(format!("unknown outbox state {other}"))),
+        })
+    }
+}
+
+/// One queued message and what has happened to it.
+#[derive(Debug, Clone)]
+pub struct OutboxEntry {
+    pub msg_id: String,
+    pub room_id: String,
+    /// The member name that signed it: the lane.
+    pub sender: String,
+    pub state: OutboxState,
+    pub created: String,
+    pub attempts: u32,
+    pub retry_at: Option<String>,
+    /// The last error, as text.
+    pub reason: Option<String>,
+    /// transport, paused, budget, home, refused or unknown.
+    pub reason_class: Option<String>,
+    pub reason_code: Option<i32>,
+    pub updated: Option<String>,
+    /// The signed message. `None` once dropped, or if it cannot be
+    /// decrypted with this helper's key.
+    pub message: Option<Message>,
+    /// There is content, but this helper cannot read it.
+    pub unreadable: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboxCounts {
+    pub pending: u64,
+    pub waiting: u64,
+    pub failed: u64,
+    pub quarantined: u64,
+    pub dropped: u64,
+}
+
+impl OutboxCounts {
+    /// Still to send.
+    pub fn queued(&self) -> u64 {
+        self.pending + self.waiting
+    }
+}
+
+/// Whole seconds from `a` to `b`, both RFC 3339. 0 if either is unreadable.
+fn seconds_between(a: &str, b: &str) -> i64 {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => (b - a).num_seconds(),
+        _ => 0,
+    }
+}
+
 impl Store {
     /// Open (or create) the database file and bring the schema up to date.
     /// Mixed versions are normal; migrations run from v0.1 on.
@@ -156,7 +282,20 @@ impl Store {
 
     /// Open with a 32-byte key: message content is then encrypted at rest.
     /// Content written before the key was set is still readable.
+    ///
+    /// Queued messages written in plain text by an older version are
+    /// sealed now, a batch per transaction. An interrupted run loses
+    /// nothing: plain rows stay readable and the next open carries on.
     pub fn open_with_key(path: &Path, key: Option<[u8; 32]>) -> Result<Self> {
+        let store = Self::open_unsealed(path, key)?;
+        store.seal_legacy_outbox(SEAL_BATCH)?;
+        Ok(store)
+    }
+
+    /// Open without sealing legacy outbox rows yet. For tests that stop
+    /// the sealing part way.
+    #[doc(hidden)]
+    pub fn open_unsealed(path: &Path, key: Option<[u8; 32]>) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -178,11 +317,74 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Deleted rows are overwritten with zeros, not just unlinked. This
+        // reduces what is left in the file; it does not reach backups,
+        // snapshots or copies below the filesystem.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         Migrations::from_slice(MIGRATIONS).to_latest(&mut conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
             cipher: key.map(|k| XChaCha20Poly1305::new((&k).into())),
+            faults: Faults::default(),
         })
+    }
+
+    /// Cap the database at its current size plus `extra` pages, so the
+    /// next writes fail as they would on a full disk.
+    #[doc(hidden)]
+    pub fn cap_size_for_test(&self, extra: u32) -> Result<()> {
+        let conn = self.lock();
+        let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        conn.pragma_update(None, "max_page_count", pages + extra as i64)?;
+        Ok(())
+    }
+
+    /// Fold the write-ahead log back into the database file and empty it,
+    /// so pages of deleted rows do not linger there. Cheap when idle; the
+    /// helper runs it on a slow tick and at shutdown.
+    pub fn checkpoint(&self) -> Result<()> {
+        let conn = self.lock();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Seal outbox rows an older version wrote in plain text, `batch` rows
+    /// per transaction. Returns how many were sealed. A no-op without a key.
+    pub fn seal_legacy_outbox(&self, batch: usize) -> Result<u64> {
+        if self.cipher.is_none() {
+            return Ok(0);
+        }
+        let mut sealed = 0u64;
+        loop {
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            let rows: Vec<(String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT msg_id, message FROM outbox
+                     WHERE message != '' AND message NOT LIKE 'enc1:%' LIMIT ?1",
+                )?;
+                let rows = stmt.query_map(params![batch as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            if rows.is_empty() {
+                tx.execute(
+                    "INSERT INTO meta (key, value) VALUES ('outbox_sealed', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![crate::message::now_ts()],
+                )?;
+                tx.commit()?;
+                return Ok(sealed);
+            }
+            for (id, plain) in rows {
+                self.faults.check("migration.row")?;
+                tx.execute(
+                    "UPDATE outbox SET message=?2 WHERE msg_id=?1",
+                    params![id, self.seal(&plain)?],
+                )?;
+                sealed += 1;
+            }
+            tx.commit()?;
+        }
     }
 
     /// True if content is encrypted at rest.
@@ -574,6 +776,10 @@ impl Store {
             )
             .optional()?;
         if exists.is_some() {
+            // Already in the chain, so delivered: a queued copy of this
+            // very message is done too. A retried entry that the home had
+            // in fact stored ends here.
+            Self::unqueue_in(conn, msg)?;
             return Ok(false);
         }
         let (last_seq, last_hash) = Self::chain_head_in(conn, &msg.room)?;
@@ -615,7 +821,20 @@ impl Store {
                 params![msg.id, self.seal(&serde_json::to_string(&msg.content())?)?],
             )?;
         }
+        // In the chain means delivered: it leaves the outbox in the same
+        // transaction, whichever way it came back (answer, push or sync).
+        Self::unqueue_in(conn, msg)?;
         Ok(true)
+    }
+
+    /// Take `msg` out of the outbox: the entry with its id and signature.
+    /// A different message that happens to carry the same id stays.
+    fn unqueue_in(conn: &Connection, msg: &Message) -> Result<()> {
+        conn.execute(
+            "DELETE FROM outbox WHERE msg_id=?1 AND (sig IS NULL OR sig=?2)",
+            params![msg.id, msg.sig],
+        )?;
+        Ok(())
     }
 
     /// Give a message the next place in the chain and store it. This is
@@ -821,52 +1040,285 @@ impl Store {
     }
 
     // ---- outbox --------------------------------------------------------
+    //
+    // pending -> (sequenced: row deleted with the append)
+    // pending|waiting -> waiting      temporary failure, retry_at set
+    // pending|waiting -> failed       the home said no for good
+    // pending|waiting -> quarantined  the same unknown answer, for long
+    // failed|quarantined -> pending   `outbox retry`
+    // failed|quarantined -> dropped   `outbox drop`: payload cleared
+    //
+    // Nothing else removes a row.
 
     /// Park a signed, unsequenced message until the room's home is
-    /// reachable. On disk before `send` returns.
+    /// reachable. On disk, sealed, before `send` returns.
     pub fn outbox_add(&self, msg: &Message) -> Result<()> {
         let conn = self.lock();
+        let sealed = self.seal(&serde_json::to_string(msg)?)?;
+        self.faults.check("outbox.add")?;
         conn.execute(
-            "INSERT OR IGNORE INTO outbox (msg_id, room_id, message, created) VALUES (?1, ?2, ?3, ?4)",
-            params![msg.id, msg.room, serde_json::to_string(msg)?, msg.ts],
+            "INSERT OR IGNORE INTO outbox (msg_id, room_id, message, created, sender, state, updated, sig)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
+            params![
+                msg.id,
+                msg.room,
+                sealed,
+                msg.ts,
+                msg.from,
+                crate::message::now_ts(),
+                msg.sig
+            ],
         )?;
         Ok(())
     }
 
-    pub fn outbox_list(&self, room_id: &str) -> Result<Vec<Message>> {
+    fn row_to_outbox(&self, row: &Row<'_>) -> rusqlite::Result<OutboxEntry> {
+        let state: String = row.get("state")?;
+        let stored: String = row.get("message")?;
+        let message = if stored.is_empty() {
+            None
+        } else {
+            self.unseal(&stored)
+                .and_then(|plain| serde_json::from_str::<Message>(&plain).ok())
+        };
+        Ok(OutboxEntry {
+            msg_id: row.get("msg_id")?,
+            room_id: row.get("room_id")?,
+            sender: row.get("sender")?,
+            state: state.parse().unwrap_or(OutboxState::Pending),
+            created: row.get("created")?,
+            attempts: row.get::<_, i64>("attempts")? as u32,
+            retry_at: row.get("retry_at")?,
+            reason: row.get("last_error")?,
+            reason_class: row.get("reason_class")?,
+            reason_code: row.get("reason_code")?,
+            updated: row.get("updated")?,
+            unreadable: !stored.is_empty() && message.is_none(),
+            message,
+        })
+    }
+
+    /// One entry by message id.
+    pub fn outbox_get(&self, msg_id: &str) -> Result<Option<OutboxEntry>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM outbox WHERE msg_id=?1",
+                params![msg_id],
+                |r| self.row_to_outbox(r),
+            )
+            .optional()?)
+    }
+
+    /// The messages still to send in a room, as lanes: one per sender, each
+    /// in the order it was queued. Only `pending` and `waiting` entries.
+    /// Queued order is insertion order (`rowid`): timestamps have whole
+    /// seconds and ids are not monotonic within one.
+    pub fn outbox_lanes(&self, room_id: &str) -> Result<Vec<(String, Vec<OutboxEntry>)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM outbox WHERE room_id=?1 AND state IN ('pending', 'waiting')
+             ORDER BY sender, rowid",
+        )?;
+        let rows = stmt.query_map(params![room_id], |r| self.row_to_outbox(r))?;
+        let mut lanes: Vec<(String, Vec<OutboxEntry>)> = Vec::new();
+        for e in rows {
+            let e = e?;
+            match lanes.last_mut() {
+                Some((sender, lane)) if *sender == e.sender => lane.push(e),
+                _ => lanes.push((e.sender.clone(), vec![e])),
+            }
+        }
+        Ok(lanes)
+    }
+
+    /// Every entry, in one room or all, in the order queued. Dropped
+    /// entries are listed too, without their content.
+    pub fn outbox_entries(&self, room_id: Option<&str>) -> Result<Vec<OutboxEntry>> {
         let conn = self.lock();
         let mut stmt =
-            conn.prepare("SELECT message FROM outbox WHERE room_id=?1 ORDER BY created, msg_id")?;
-        let rows = stmt.query_map(params![room_id], |r| {
-            let s: String = r.get(0)?;
-            serde_json::from_str::<Message>(&s).map_err(|_| rusqlite::Error::InvalidQuery)
-        })?;
+            conn.prepare("SELECT * FROM outbox WHERE (?1 IS NULL OR room_id=?1) ORDER BY rowid")?;
+        let rows = stmt.query_map(params![room_id], |r| self.row_to_outbox(r))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn outbox_remove(&self, msg_id: &str) -> Result<()> {
+    fn outbox_set(&self, sql: &str, args: &[&dyn rusqlite::ToSql]) -> Result<bool> {
         let conn = self.lock();
-        conn.execute("DELETE FROM outbox WHERE msg_id=?1", params![msg_id])?;
-        Ok(())
+        self.faults.check("outbox.state")?;
+        Ok(conn.execute(sql, args)? == 1)
     }
 
-    pub fn outbox_note_failure(&self, msg_id: &str, err: &str) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
-            "UPDATE outbox SET attempts=attempts+1, last_error=?2 WHERE msg_id=?1",
-            params![msg_id, err],
+    /// A temporary failure: try again at `retry_at`. `class` says why
+    /// (transport, paused, budget, home) so the right event can wake it
+    /// early.
+    pub fn outbox_wait(
+        &self,
+        msg_id: &str,
+        class: &str,
+        reason: &str,
+        code: Option<i32>,
+        retry_at: &str,
+        now: &str,
+    ) -> Result<bool> {
+        self.outbox_set(
+            "UPDATE outbox SET state='waiting', attempts=attempts+1, retry_at=?3,
+               reason_class=?4, last_error=?5, reason_code=?6, updated=?2
+             WHERE msg_id=?1 AND state IN ('pending', 'waiting')",
+            &[&msg_id, &now, &retry_at, &class, &reason, &code],
+        )
+    }
+
+    /// The home said no for good. Kept, out of its lane, for a person to
+    /// retry or drop.
+    pub fn outbox_fail(
+        &self,
+        msg_id: &str,
+        reason: &str,
+        code: Option<i32>,
+        now: &str,
+    ) -> Result<bool> {
+        self.outbox_set(
+            "UPDATE outbox SET state='failed', attempts=attempts+1, retry_at=NULL,
+               reason_class='refused', last_error=?3, reason_code=?4, updated=?2
+             WHERE msg_id=?1 AND state IN ('pending', 'waiting')",
+            &[&msg_id, &now, &reason, &code],
+        )
+    }
+
+    /// An answer this helper does not understand. Kept and retried at
+    /// `retry_at`; quarantined once the same answer (`code`) has come back
+    /// at least `min_count` times over at least `min_secs` seconds. Both
+    /// must hold, so neither a burst nor a slow trickle decides alone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn outbox_unknown(
+        &self,
+        msg_id: &str,
+        reason: &str,
+        code: Option<i32>,
+        retry_at: &str,
+        now: &str,
+        min_count: u32,
+        min_secs: i64,
+    ) -> Result<OutboxState> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let row: Option<(Option<i32>, Option<String>, i64)> = tx
+            .query_row(
+                "SELECT unknown_code, unknown_since, unknown_count FROM outbox
+                 WHERE msg_id=?1 AND state IN ('pending', 'waiting')",
+                params![msg_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((last_code, since, count)) = row else {
+            return Err(Error::Invalid(format!(
+                "{msg_id} is not waiting to be sent"
+            )));
+        };
+        let (since, count) = match (last_code == code, since) {
+            (true, Some(since)) => (since, count as u32 + 1),
+            _ => (now.to_string(), 1),
+        };
+        let held_for = seconds_between(&since, now);
+        let state = if count >= min_count && held_for >= min_secs {
+            OutboxState::Quarantined
+        } else {
+            OutboxState::Waiting
+        };
+        self.faults.check("outbox.state")?;
+        tx.execute(
+            "UPDATE outbox SET state=?2, attempts=attempts+1, retry_at=?3,
+               reason_class='unknown', last_error=?4, reason_code=?5,
+               unknown_code=?5, unknown_since=?6, unknown_count=?7, updated=?8
+             WHERE msg_id=?1",
+            params![
+                msg_id,
+                state.as_str(),
+                if state == OutboxState::Waiting {
+                    Some(retry_at)
+                } else {
+                    None
+                },
+                reason,
+                code,
+                since,
+                count,
+                now
+            ],
         )?;
-        Ok(())
+        tx.commit()?;
+        Ok(state)
     }
 
-    pub fn outbox_count(&self, room_id: &str) -> Result<u64> {
+    /// Put a failed or quarantined message back in its lane, as it was:
+    /// same id, same signature. Returns false if it was neither.
+    pub fn outbox_retry(&self, msg_id: &str, now: &str) -> Result<bool> {
+        self.outbox_set(
+            "UPDATE outbox SET state='pending', attempts=0, retry_at=NULL,
+               unknown_code=NULL, unknown_since=NULL, unknown_count=0, updated=?2
+             WHERE msg_id=?1 AND state IN ('failed', 'quarantined') AND message != ''",
+            &[&msg_id, &now],
+        )
+    }
+
+    /// Give up on a failed or quarantined message, on purpose. The row
+    /// stays as a record; its content is wiped.
+    pub fn outbox_drop(&self, msg_id: &str, now: &str) -> Result<bool> {
+        self.outbox_set(
+            "UPDATE outbox SET state='dropped', message='', retry_at=NULL, updated=?2
+             WHERE msg_id=?1 AND state IN ('failed', 'quarantined')",
+            &[&msg_id, &now],
+        )
+    }
+
+    /// Make every message waiting for this reason due now: the link came
+    /// back, or the room was resumed.
+    pub fn outbox_wake(&self, room_id: &str, class: &str) -> Result<u64> {
         let conn = self.lock();
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM outbox WHERE room_id=?1",
-            params![room_id],
-            |r| r.get(0),
+        let n = conn.execute(
+            "UPDATE outbox SET retry_at=NULL
+             WHERE room_id=?1 AND state='waiting' AND reason_class=?2",
+            params![room_id, class],
         )?;
         Ok(n as u64)
+    }
+
+    /// Take a message out of the outbox because its sender was told, there
+    /// and then, that the home refused it.
+    pub fn outbox_remove(&self, msg_id: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM outbox WHERE msg_id=?1 AND state IN ('pending', 'waiting')",
+            params![msg_id],
+        )?;
+        Ok(())
+    }
+
+    /// Messages still to send: pending and waiting.
+    pub fn outbox_count(&self, room_id: &str) -> Result<u64> {
+        Ok(self.outbox_counts(room_id)?.queued())
+    }
+
+    pub fn outbox_counts(&self, room_id: &str) -> Result<OutboxCounts> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT state, COUNT(*) FROM outbox WHERE room_id=?1 GROUP BY state")?;
+        let rows = stmt.query_map(params![room_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut c = OutboxCounts::default();
+        for row in rows {
+            let (state, n) = row?;
+            let n = n as u64;
+            match state.parse().unwrap_or(OutboxState::Pending) {
+                OutboxState::Pending => c.pending += n,
+                OutboxState::Waiting => c.waiting += n,
+                OutboxState::Failed => c.failed += n,
+                OutboxState::Quarantined => c.quarantined += n,
+                OutboxState::Dropped => c.dropped += n,
+            }
+        }
+        Ok(c)
     }
 
     // ---- invites -------------------------------------------------------
@@ -930,17 +1382,46 @@ impl Store {
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let per_minute = Self::count_since(&conn, room_id, Some(from), &minute_ago)?;
         if per_minute >= limits.per_minute_per_sender {
-            return Err(Error::OverBudget(format!(
-                "{from} sent {per_minute} messages in the last minute; the limit is {}",
-                limits.per_minute_per_sender
-            )));
+            // The window frees up when the oldest message in it turns a
+            // minute old.
+            let oldest: Option<String> = conn.query_row(
+                "SELECT MIN(received) FROM messages WHERE room_id=?1 AND from_name=?2 AND received>=?3",
+                params![room_id, from, minute_ago],
+                |r| r.get(0),
+            )?;
+            let wait = oldest
+                .map(|o| {
+                    60 - seconds_between(
+                        &o,
+                        &now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    )
+                })
+                .unwrap_or(60)
+                .clamp(1, 60) as u64;
+            return Err(Error::OverBudget(
+                format!(
+                    "{from} sent {per_minute} messages in the last minute; the limit is {}",
+                    limits.per_minute_per_sender
+                ),
+                Some(wait),
+            ));
         }
         let today = Self::count_since(&conn, room_id, None, &day_start)?;
         if today >= limits.daily_per_room {
-            return Err(Error::OverBudget(format!(
-                "room has used its daily budget of {} messages",
-                limits.daily_per_room
-            )));
+            let midnight = now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc()
+                + chrono::Duration::days(1);
+            let wait = (midnight - now).num_seconds().max(1) as u64;
+            return Err(Error::OverBudget(
+                format!(
+                    "room has used its daily budget of {} messages",
+                    limits.daily_per_room
+                ),
+                Some(wait),
+            ));
         }
         let alert_at = limits.daily_per_room as u64 * limits.burst_alert_percent as u64 / 100;
         Ok(today as u64 + 1 == alert_at)
@@ -1071,8 +1552,10 @@ mod tests {
         s.outbox_add(&m).unwrap();
         s.outbox_add(&m).unwrap();
         assert_eq!(s.outbox_count("r_test").unwrap(), 1);
-        assert_eq!(s.outbox_list("r_test").unwrap(), vec![m.clone()]);
-        s.outbox_note_failure(&m.id, "offline").unwrap();
+        let lanes = s.outbox_lanes("r_test").unwrap();
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].0, "haris");
+        assert_eq!(lanes[0].1[0].message.as_ref(), Some(&m));
         s.outbox_remove(&m.id).unwrap();
         assert_eq!(s.outbox_count("r_test").unwrap(), 0);
 
@@ -1114,7 +1597,7 @@ mod tests {
         s.sequence_and_append(&mut b).unwrap();
         assert!(matches!(
             s.check_limits("r_test", "haris", &limits),
-            Err(Error::OverBudget(_))
+            Err(Error::OverBudget(..))
         ));
         // Another sender is under the per-minute limit but the daily
         // budget is about to be hit: the alert fires on the third message.
@@ -1152,7 +1635,265 @@ mod tests {
         }
         assert!(matches!(
             s.check_limits("r_test", "haris", &limits),
-            Err(Error::OverBudget(_))
+            Err(Error::OverBudget(..))
         ));
+    }
+
+    fn msg_from(who: &Identity, from: &str, text: &str) -> Message {
+        Message::new(
+            Draft {
+                room: "r_test".into(),
+                from: from.into(),
+                text: text.into(),
+                kind: Some(MessageType::Chat),
+                ..Default::default()
+            },
+            who,
+        )
+        .unwrap()
+    }
+
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "diavlos-store-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("diavlos.db")
+    }
+
+    const T0: &str = "2026-01-01T00:00:00Z";
+
+    #[test]
+    fn the_outbox_accounts_for_every_message() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let msgs: Vec<Message> = (0..6)
+            .map(|i| {
+                msg_from(
+                    &owner,
+                    if i % 2 == 0 { "haris" } else { "bob" },
+                    &format!("m{i}"),
+                )
+            })
+            .collect();
+        for m in &msgs {
+            s.outbox_add(m).unwrap();
+        }
+        // Two lanes, each in the order queued.
+        let lanes = s.outbox_lanes("r_test").unwrap();
+        assert_eq!(lanes.len(), 2);
+        assert!(lanes.iter().all(|(_, l)| l.len() == 3));
+
+        // One of each outcome.
+        let mut delivered = msgs[0].clone();
+        s.sequence_and_append(&mut delivered).unwrap();
+        s.outbox_wait(
+            &msgs[1].id,
+            "transport",
+            "offline",
+            Some(3),
+            "2026-01-01T00:01:00Z",
+            T0,
+        )
+        .unwrap();
+        s.outbox_fail(&msgs[2].id, "denied", Some(6), T0).unwrap();
+        s.outbox_fail(&msgs[3].id, "denied", Some(6), T0).unwrap();
+        s.outbox_drop(&msgs[3].id, T0).unwrap();
+        for i in 0..5 {
+            let now = format!("2026-01-01T0{i}:00:00Z");
+            s.outbox_unknown(&msgs[4].id, "huh", Some(1), &now, &now, 5, 3600)
+                .unwrap();
+        }
+        let c = s.outbox_counts("r_test").unwrap();
+        assert_eq!(
+            c,
+            OutboxCounts {
+                pending: 1,
+                waiting: 1,
+                failed: 1,
+                quarantined: 1,
+                dropped: 1
+            }
+        );
+        // Accepted = in the chain + everything still in the outbox.
+        let in_chain = s.messages_after("r_test", 0, 100).unwrap().len() as u64;
+        assert_eq!(
+            in_chain + c.pending + c.waiting + c.failed + c.quarantined + c.dropped,
+            msgs.len() as u64
+        );
+        // A dropped entry keeps its record but not its content.
+        let dropped = s.outbox_get(&msgs[3].id).unwrap().unwrap();
+        assert_eq!(dropped.state, OutboxState::Dropped);
+        assert!(dropped.message.is_none());
+        // Retry puts a quarantined message back as it was.
+        assert!(s.outbox_retry(&msgs[4].id, T0).unwrap());
+        let back = s.outbox_get(&msgs[4].id).unwrap().unwrap();
+        assert_eq!(back.state, OutboxState::Pending);
+        assert_eq!(back.message.as_ref(), Some(&msgs[4]));
+        // Only failed or quarantined entries can be retried or dropped.
+        assert!(!s.outbox_retry(&msgs[5].id, T0).unwrap());
+        assert!(!s.outbox_drop(&msgs[5].id, T0).unwrap());
+        assert!(!s.outbox_retry(&msgs[3].id, T0).unwrap());
+    }
+
+    #[test]
+    fn an_unknown_answer_is_quarantined_only_after_both_count_and_time() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let m = msg(&owner, "x");
+        s.outbox_add(&m).unwrap();
+        let at = |mins: u32| format!("2026-01-01T{:02}:{:02}:00Z", mins / 60, mins % 60);
+        // A fast burst: many answers, little time.
+        for i in 0..20 {
+            let st = s
+                .outbox_unknown(&m.id, "huh", Some(1), &at(i), &at(i), 5, 3600)
+                .unwrap();
+            assert_eq!(st, OutboxState::Waiting);
+        }
+        // A different answer starts the count again.
+        let st = s
+            .outbox_unknown(&m.id, "other", Some(9), &at(61), &at(61), 5, 3600)
+            .unwrap();
+        assert_eq!(st, OutboxState::Waiting);
+        // Slow: an hour passes but only a few answers came.
+        for i in [90, 120, 180] {
+            let st = s
+                .outbox_unknown(&m.id, "other", Some(9), &at(i), &at(i), 5, 3600)
+                .unwrap();
+            assert_eq!(st, OutboxState::Waiting);
+        }
+        // The fifth same answer, more than an hour after the first.
+        let st = s
+            .outbox_unknown(&m.id, "other", Some(9), &at(200), &at(200), 5, 3600)
+            .unwrap();
+        assert_eq!(st, OutboxState::Quarantined);
+        assert_eq!(s.outbox_count("r_test").unwrap(), 0);
+        assert_eq!(s.outbox_counts("r_test").unwrap().quarantined, 1);
+    }
+
+    #[test]
+    fn queued_messages_are_sealed_and_old_plain_ones_get_sealed_too() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let key = [7u8; 32];
+        let canary = "CANARY-4f1b9e-queued-text";
+        let path = temp_db("seal");
+
+        // An older helper, no key: three plain rows.
+        let ids: Vec<String> = {
+            let s = Store::open_with_key(&path, None).unwrap();
+            s.create_room(&room(&owner)).unwrap();
+            (0..3)
+                .map(|i| {
+                    let m = msg(&owner, &format!("{canary} {i}"));
+                    s.outbox_add(&m).unwrap();
+                    m.id
+                })
+                .collect()
+        };
+
+        // Sealing stops after two rows: the first batch of two committed,
+        // the second rolled back.
+        {
+            let s = Store::open_unsealed(&path, Some(key)).unwrap();
+            s.faults.arm_after("migration.row", 2);
+            assert!(s.seal_legacy_outbox(2).is_err());
+            let entries = s.outbox_entries(None).unwrap();
+            assert_eq!(entries.len(), 3);
+            assert!(
+                entries.iter().all(|e| e.message.is_some()),
+                "plain and sealed both read"
+            );
+        }
+
+        // The next open carries on and finishes.
+        {
+            let s = Store::open_with_key(&path, Some(key)).unwrap();
+            let entries = s.outbox_entries(None).unwrap();
+            assert_eq!(entries.len(), 3);
+            for (e, id) in entries.iter().zip(&ids) {
+                assert_eq!(&e.msg_id, id);
+                assert!(e.message.as_ref().unwrap().text.starts_with(canary));
+            }
+            // A new row is sealed before it is written.
+            s.outbox_add(&msg(&owner, &format!("{canary} new")))
+                .unwrap();
+            // Failed and dropped rows stay sealed or empty.
+            s.outbox_fail(&ids[0], "no", Some(6), T0).unwrap();
+            s.outbox_fail(&ids[1], "no", Some(6), T0).unwrap();
+            s.outbox_drop(&ids[1], T0).unwrap();
+            s.checkpoint().unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend(std::fs::read(path.with_extension("db-wal")).unwrap_or_default());
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(canary),
+            "plain queued text left in the database files"
+        );
+
+        // Without the key the rows are there but unreadable, never garbage.
+        let s = Store::open_with_key(&path, None).unwrap();
+        let e = s.outbox_get(&ids[2]).unwrap().unwrap();
+        assert!(e.unreadable && e.message.is_none());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_full_disk_refuses_the_message_and_leaves_nothing_half_written() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory_with_key([3u8; 32]).unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        s.cap_size_for_test(4).unwrap();
+        let big = "x".repeat(3000);
+        let mut kept = Vec::new();
+        let err = loop {
+            let m = msg(&owner, &big);
+            match s.outbox_add(&m) {
+                Ok(()) => kept.push(m.id),
+                Err(e) => break (e, m.id),
+            }
+            assert!(kept.len() < 1000, "never filled up");
+        };
+        match &err.0 {
+            Error::Db(rusqlite::Error::SqliteFailure(f, _)) => {
+                assert_eq!(f.code, rusqlite::ErrorCode::DiskFull)
+            }
+            other => panic!("expected a full disk, got {other}"),
+        }
+        // The refused one is not there; every earlier one is, whole.
+        assert!(s.outbox_get(&err.1).unwrap().is_none());
+        for id in &kept {
+            assert!(s.outbox_get(id).unwrap().unwrap().message.is_some());
+        }
+        // The same when the chain itself is full: no half message.
+        let before = s.message_count("r_test").unwrap();
+        let mut m = msg(&owner, &big);
+        assert!(s.sequence_and_append(&mut m).is_err());
+        assert_eq!(s.message_count("r_test").unwrap(), before);
+    }
+
+    #[test]
+    fn a_queued_copy_of_a_message_already_in_the_chain_is_cleared() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let mut m = msg(&owner, "stored at the home, answer lost");
+        s.sequence_and_append(&mut m).unwrap();
+        // Queued again afterwards (a retry of something the home had).
+        s.outbox_add(&m).unwrap();
+        assert!(!s.append(&m).unwrap(), "not stored twice");
+        assert!(s.outbox_get(&m.id).unwrap().is_none());
+        // A different message under the same id is not mistaken for it.
+        let mut other = msg(&owner, "something else");
+        other.id = m.id.clone();
+        s.outbox_add(&other).unwrap();
+        let _ = s.append(&m);
+        assert!(s.outbox_get(&m.id).unwrap().is_some());
     }
 }

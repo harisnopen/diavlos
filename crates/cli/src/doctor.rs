@@ -191,14 +191,24 @@ pub async fn run(paths: &Paths) -> Value {
                 for r in &s.rooms {
                     check(
                         &format!("room {}", r.name),
-                        r.connected && r.queued == 0,
+                        r.connected && r.queued == 0 && r.failed == 0 && r.quarantined == 0,
                         format!(
-                            "{}, {}, {} members, {} messages, {} queued{}",
+                            "{}, {}, {} members, {} messages, {} queued{}{}{}",
                             if r.home { "home" } else { "member" },
                             if r.connected { "linked" } else { "offline" },
                             r.members,
                             r.messages,
                             r.queued,
+                            if r.failed > 0 {
+                                format!(", {} failed (diavlos outbox)", r.failed)
+                            } else {
+                                String::new()
+                            },
+                            if r.quarantined > 0 {
+                                format!(", {} quarantined (diavlos outbox)", r.quarantined)
+                            } else {
+                                String::new()
+                            },
                             if r.paused { ", paused" } else { "" }
                         ),
                     );

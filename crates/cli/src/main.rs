@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use diavlos_client::proto::{
-    AskResult, CheckApproveResult, DraftWire, ExportResult, InviteResult, JoinResult, ReadResult,
-    Request, RotateResult, SendResult, StatusResult, WhoEntry,
+    AskResult, CheckApproveResult, DraftWire, ExportResult, InviteResult, JoinResult, OutboxItem,
+    ReadResult, Request, RotateResult, SendResult, StatusResult, WhoEntry,
 };
 use diavlos_client::{Client, Paths};
 use diavlos_core::{ControlOp, DataClass, Error, Message, MessageType, Role};
@@ -251,6 +251,12 @@ enum Cmd {
         #[command(subcommand)]
         action: ServiceCmd,
     },
+    /// Messages still to reach a room's home, and ones it would not take.
+    /// Nothing leaves the outbox except by reaching the home or by `drop`.
+    Outbox {
+        #[command(subcommand)]
+        which: Option<OutboxCmd>,
+    },
     /// See rooms and peers.
     Status {
         #[arg(long)]
@@ -338,6 +344,23 @@ enum McpCmd {
         #[arg(long)]
         list: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum OutboxCmd {
+    /// Every queued message, its state and why. The default.
+    List {
+        /// Only this room.
+        room: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put a failed or quarantined message back in line, unchanged: same
+    /// id, same signature.
+    Retry { id: String },
+    /// Give up on a failed or quarantined message. Its content is wiped;
+    /// a record that it was dropped stays.
+    Drop { id: String },
 }
 
 #[derive(Subcommand)]
@@ -1043,6 +1066,56 @@ matches `diavlos who`, or pass --owner."
             }
             Ok(0)
         }
+        Cmd::Outbox { which } => match which.unwrap_or(OutboxCmd::List {
+            room: None,
+            json: false,
+        }) {
+            OutboxCmd::List { room, json } => {
+                let v = client.call(&Request::Outbox { room }).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(0);
+                }
+                let items: Vec<OutboxItem> = serde_json::from_value(v)?;
+                if items.is_empty() {
+                    println!("the outbox is empty: everything sent has reached its room");
+                }
+                for i in items {
+                    let mut line = format!(
+                        "{}  {}  {}  {:<11} {} attempt{}",
+                        i.id,
+                        i.room,
+                        i.sender,
+                        i.state,
+                        i.attempts,
+                        if i.attempts == 1 { "" } else { "s" }
+                    );
+                    if let Some(at) = &i.retry_at {
+                        line.push_str(&format!(", next try {at}"));
+                    }
+                    if let Some(r) = &i.reason {
+                        line.push_str(&format!("\n    {r}"));
+                    }
+                    if !i.text.is_empty() {
+                        line.push_str(&format!("\n    {}", i.text));
+                    }
+                    println!("{line}");
+                }
+                Ok(0)
+            }
+            OutboxCmd::Retry { id } => {
+                client
+                    .call(&Request::OutboxRetry { id: id.clone() })
+                    .await?;
+                println!("{id} is back in line; it goes as soon as the home takes it");
+                Ok(0)
+            }
+            OutboxCmd::Drop { id } => {
+                client.call(&Request::OutboxDrop { id: id.clone() }).await?;
+                println!("dropped {id}; its content is gone, a record stays");
+                Ok(0)
+            }
+        },
         Cmd::Status { json } => {
             let v = client.call(&Request::Status).await?;
             let s: StatusResult = serde_json::from_value(v)?;
@@ -1058,6 +1131,16 @@ matches `diavlos who`, or pass --owner."
                 println!("no rooms yet. Try: diavlos new <room>");
             }
             for r in &s.rooms {
+                let mut outbox = String::new();
+                for (n, what) in [
+                    (r.queued, "queued"),
+                    (r.failed, "failed"),
+                    (r.quarantined, "quarantined"),
+                ] {
+                    if n > 0 {
+                        outbox.push_str(&format!(", {n} {what}"));
+                    }
+                }
                 println!(
                     "  {:<20} {:<7} {:<9} {} members, {} messages{}{} (you: {})",
                     r.name,
@@ -1065,14 +1148,13 @@ matches `diavlos who`, or pass --owner."
                     if r.connected { "linked" } else { "offline" },
                     r.members,
                     r.messages,
-                    if r.queued > 0 {
-                        format!(", {} queued", r.queued)
-                    } else {
-                        String::new()
-                    },
+                    outbox,
                     if r.paused { ", paused" } else { "" },
                     r.me.join(", "),
                 );
+                if r.failed + r.quarantined > 0 {
+                    println!("  {:<20} see: diavlos outbox {}", "", r.name);
+                }
             }
             Ok(0)
         }

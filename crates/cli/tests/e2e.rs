@@ -155,11 +155,34 @@ fn two_helpers_trade_messages_and_nothing_is_lost() {
     assert!(out.starts_with("queued"), "{out}");
     let st = b.ok(&["status"]);
     assert!(st.contains("1 queued"), "{st}");
+    let ob = b.ok(&["outbox"]);
+    assert!(
+        ob.contains("pending") && ob.contains("while you were out"),
+        "{ob}"
+    );
+    // Only a failed or quarantined message can be retried or dropped.
+    let queued_id = ob.split_whitespace().next().unwrap().to_string();
+    b.fails_with(&["outbox", "drop", &queued_id], 1);
 
     // A comes back (any command starts the helper) and the message arrives.
     a.ok(&["status"]);
     let got = a.ok(&["next", "ops", "--timeout", "30"]);
     assert!(got.contains("bob (done): while you were out"), "{got}");
+    // The home has it before the sender hears back; give the answer a
+    // moment to arrive.
+    let mut ob = String::new();
+    for _ in 0..50 {
+        ob = b.ok(&["outbox"]);
+        if ob.contains("the outbox is empty") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(
+        ob.contains("the outbox is empty"),
+        "{ob}\n{}",
+        b.helper_log()
+    );
 
     // Reading never deletes: the whole log is still there.
     let all = a.ok(&["read", "ops", "--since", "1", "--limit", "50", "--json"]);

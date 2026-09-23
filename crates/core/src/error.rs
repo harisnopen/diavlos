@@ -4,6 +4,7 @@
 //! 2 = not in room, 3 = reached nobody, 4 = timed out, 5 = name already
 //! taken, 6 = denied, 7 = room paused. Anything else is 1.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Exit code for "not in room".
@@ -37,8 +38,10 @@ pub enum Error {
     Invalid(String),
     #[error("bad signature: {0}")]
     BadSignature(String),
+    /// Over a rate limit or the daily budget. The number is how many
+    /// seconds until the limit lets the next message through, when known.
     #[error("over budget: {0}")]
-    OverBudget(String),
+    OverBudget(String, Option<u64>),
     #[error("storage: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("migration: {0}")]
@@ -62,6 +65,39 @@ impl Error {
             Error::Denied(_) | Error::BadSignature(_) => CODE_DENIED,
             Error::RoomPaused(_) => CODE_ROOM_PAUSED,
             _ => 1,
+        }
+    }
+
+    /// Should a sender try the same message again later? `None` when that
+    /// is not known: the caller keeps it and retries, and only gives up
+    /// when the same unknown answer has come back for a long time.
+    ///
+    /// Temporary: the other side was not reached, is paused, over budget,
+    /// or failed to store it. Definitive: retrying the same signed bytes
+    /// cannot succeed.
+    pub fn fate(&self) -> Option<Fate> {
+        match self {
+            Error::ReachedNobody(_)
+            | Error::TimedOut
+            | Error::RoomPaused(_)
+            | Error::OverBudget(..)
+            | Error::Io(_)
+            | Error::Db(_)
+            | Error::Migration(_) => Some(Fate::Temporary),
+            Error::NotInRoom(_)
+            | Error::NameTaken(_)
+            | Error::Denied(_)
+            | Error::BadSignature(_)
+            | Error::Invalid(_) => Some(Fate::Definitive),
+            Error::Json(_) | Error::Other(_) => None,
+        }
+    }
+
+    /// Seconds until trying again can work, when the error knows.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            Error::OverBudget(_, secs) => *secs,
+            _ => None,
         }
     }
 
@@ -111,6 +147,16 @@ fn strip_labels(msg: &str) -> String {
             return m.to_string();
         }
     }
+}
+
+/// What to do with a message the other side did not take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Fate {
+    /// Keep it and try again later.
+    Temporary,
+    /// Stop: the same message will never be taken.
+    Definitive,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

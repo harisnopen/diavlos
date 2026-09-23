@@ -140,6 +140,19 @@ pub enum Request {
     Whoami {
         identity: String,
     },
+    /// Messages still to reach a room's home, and ones it would not take.
+    Outbox {
+        #[serde(default)]
+        room: Option<String>,
+    },
+    /// Put a failed or quarantined message back in line, unchanged.
+    OutboxRetry {
+        id: String,
+    },
+    /// Give up on a failed or quarantined message. Its content is wiped.
+    OutboxDrop {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,7 +213,14 @@ pub struct RoomStatus {
     pub connected: bool,
     pub members: usize,
     pub messages: u64,
+    /// Still to send: pending or waiting to try again.
     pub queued: u64,
+    /// The home refused them for good; see `diavlos outbox`.
+    #[serde(default)]
+    pub failed: u64,
+    /// The same unknown answer kept coming back; see `diavlos outbox`.
+    #[serde(default)]
+    pub quarantined: u64,
     pub me: Vec<String>,
     pub paused: bool,
 }
@@ -304,6 +324,32 @@ pub struct SendResult {
     /// True once the room's home has given it a place in the chain. False
     /// means it is on disk here and will go when the home is reachable.
     pub delivered: bool,
+}
+
+/// One message in the outbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxItem {
+    pub id: String,
+    pub room: String,
+    pub sender: String,
+    /// pending, waiting, failed, quarantined or dropped.
+    pub state: String,
+    #[serde(default)]
+    pub kind: Option<MessageType>,
+    /// The first line of the text, shortened. Empty once dropped.
+    #[serde(default)]
+    pub text: String,
+    pub created: String,
+    pub attempts: u32,
+    #[serde(default)]
+    pub retry_at: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// transport, paused, budget, home, refused or unknown.
+    #[serde(default)]
+    pub reason_class: Option<String>,
+    #[serde(default)]
+    pub code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

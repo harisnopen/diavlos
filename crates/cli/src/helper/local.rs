@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use diavlos_client::proto::{
     AskResult, CheckApproveResult, DraftWire, ExportResult, HelloResult, InviteResult, JoinResult,
-    ReadResult, Request, Response, RoomStatus, RotateResult, SendResult, StatusResult, WhoEntry,
-    WhoamiResult,
+    OutboxItem, ReadResult, Request, Response, RoomStatus, RotateResult, SendResult, StatusResult,
+    WhoEntry, WhoamiResult,
 };
 use diavlos_client::Paths;
 use diavlos_core::{
@@ -23,6 +23,7 @@ use interprocess::local_socket::ListenerOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, warn};
 
+use super::outbox::Outcome;
 use super::Helper;
 use crate::net::Wire;
 
@@ -301,6 +302,9 @@ async fn dispatch(helper: &Arc<Helper>, req: Request) -> Result<serde_json::Valu
         Request::Rotate { room, identity } => {
             serde_json::to_value(rotate(helper, &room, &identity).await?)?
         }
+        Request::Outbox { room } => serde_json::to_value(outbox_list(helper, room.as_deref())?)?,
+        Request::OutboxRetry { id } => serde_json::to_value(outbox_retry(helper, &id).await?)?,
+        Request::OutboxDrop { id } => serde_json::to_value(outbox_drop(helper, &id)?)?,
         Request::Events { .. } | Request::Watch { .. } => {
             return Err(Error::Invalid("streaming op on a plain call".into()))
         }
@@ -313,6 +317,7 @@ async fn status(helper: &Helper) -> Result<StatusResult> {
     let home_links = helper.home_links.lock().await;
     for room in helper.store.list_rooms()? {
         let home = helper.is_home(&room);
+        let outbox = helper.store.outbox_counts(&room.id)?;
         rooms.push(RoomStatus {
             name: room.name.clone(),
             id: room.id.clone(),
@@ -324,7 +329,9 @@ async fn status(helper: &Helper) -> Result<StatusResult> {
                     .unwrap_or(false),
             members: helper.store.members(&room.id)?.len(),
             messages: helper.store.message_count(&room.id)?,
-            queued: helper.store.outbox_count(&room.id)?,
+            queued: outbox.queued(),
+            failed: outbox.failed,
+            quarantined: outbox.quarantined,
             me: helper
                 .store
                 .local_members(&room.id)?
@@ -345,6 +352,96 @@ async fn status(helper: &Helper) -> Result<StatusResult> {
     })
 }
 
+fn outbox_item(helper: &Helper, e: diavlos_core::OutboxEntry) -> OutboxItem {
+    let room = helper
+        .store
+        .room_by_id(&e.room_id)
+        .ok()
+        .flatten()
+        .map(|r| r.name)
+        .unwrap_or_else(|| e.room_id.clone());
+    let text = e
+        .message
+        .as_ref()
+        .map(|m| {
+            let line = m.text.lines().next().unwrap_or("");
+            let mut t: String = line.chars().take(60).collect();
+            if t.len() < line.len() || m.text.lines().nth(1).is_some() {
+                t.push('…');
+            }
+            t
+        })
+        .unwrap_or_default();
+    OutboxItem {
+        id: e.msg_id,
+        room,
+        sender: e.sender,
+        state: if e.unreadable {
+            format!("{} (unreadable)", e.state.as_str())
+        } else {
+            e.state.as_str().to_string()
+        },
+        kind: e.message.as_ref().map(|m| m.kind),
+        text,
+        created: e.created,
+        attempts: e.attempts,
+        retry_at: e.retry_at,
+        reason: e.reason,
+        reason_class: e.reason_class,
+        code: e.reason_code,
+    }
+}
+
+fn outbox_list(helper: &Helper, room: Option<&str>) -> Result<Vec<OutboxItem>> {
+    let room_id = match room {
+        Some(r) => Some(helper.store.room(r)?.id),
+        None => None,
+    };
+    Ok(helper
+        .store
+        .outbox_entries(room_id.as_deref())?
+        .into_iter()
+        .map(|e| outbox_item(helper, e))
+        .collect())
+}
+
+async fn outbox_retry(helper: &Helper, id: &str) -> Result<OutboxItem> {
+    if !helper.store.outbox_retry(id, &helper.now_ts())? {
+        return Err(Error::Invalid(format!(
+            "{id} is not a failed or quarantined message in the outbox"
+        )));
+    }
+    let e = helper
+        .store
+        .outbox_get(id)?
+        .ok_or_else(|| Error::Invalid(format!("{id} vanished")))?;
+    helper.emit(
+        "send_retried",
+        Some(&e.room_id),
+        serde_json::json!({"id": id, "sender": e.sender}),
+    );
+    helper.wake_room(&e.room_id).await;
+    Ok(outbox_item(helper, e))
+}
+
+fn outbox_drop(helper: &Helper, id: &str) -> Result<OutboxItem> {
+    if !helper.store.outbox_drop(id, &helper.now_ts())? {
+        return Err(Error::Invalid(format!(
+            "{id} is not a failed or quarantined message in the outbox; only those can be dropped"
+        )));
+    }
+    let e = helper
+        .store
+        .outbox_get(id)?
+        .ok_or_else(|| Error::Invalid(format!("{id} vanished")))?;
+    helper.emit(
+        "send_dropped",
+        Some(&e.room_id),
+        serde_json::json!({"id": id, "sender": e.sender}),
+    );
+    Ok(outbox_item(helper, e))
+}
+
 fn local_member(helper: &Helper, room: &Room, identity: &str) -> Result<LocalMember> {
     helper
         .store
@@ -352,7 +449,7 @@ fn local_member(helper: &Helper, room: &Room, identity: &str) -> Result<LocalMem
         .ok_or_else(|| Error::NotInRoom(room.name.clone()))
 }
 
-async fn new_room(
+pub(super) async fn new_room(
     helper: &Helper,
     name: &str,
     about: &str,
@@ -425,7 +522,7 @@ async fn new_room(
     Ok(room)
 }
 
-async fn invite(
+pub(super) async fn invite(
     helper: &Helper,
     room: &str,
     name: &str,
@@ -490,7 +587,7 @@ async fn invite(
     })
 }
 
-async fn join(helper: &Arc<Helper>, token: &str, identity: &str) -> Result<JoinResult> {
+pub(super) async fn join(helper: &Arc<Helper>, token: &str, identity: &str) -> Result<JoinResult> {
     let inv = diavlos_core::Invite::decode(token)?;
     if let Some(pin) = &inv.for_node {
         if *pin != helper.net.node_id() {
@@ -535,6 +632,19 @@ async fn join(helper: &Arc<Helper>, token: &str, identity: &str) -> Result<JoinR
         });
     }
     let link = helper.net.dial(&inv.home_node, &inv.home_hints).await?;
+    let joined = join_over(helper, &link, token, identity).await;
+    link.close();
+    joined
+}
+
+/// Join over a link to the room's home that is already open.
+pub(super) async fn join_over(
+    helper: &Arc<Helper>,
+    link: &Arc<dyn crate::net::Link>,
+    token: &str,
+    identity: &str,
+) -> Result<JoinResult> {
+    let id = helper.identity(identity).await?;
     let hello = Wire::Hello {
         v: diavlos_core::PROTOCOL_VERSION,
         node: helper.net.node_id(),
@@ -547,7 +657,6 @@ async fn join(helper: &Arc<Helper>, token: &str, identity: &str) -> Result<JoinR
         hints: helper.net.hints(),
     };
     let reply = link.request(&req).await?.into_result()?;
-    link.close();
     let Wire::JoinOk {
         room,
         members,
@@ -648,7 +757,12 @@ async fn build(
     helper.draft_from(room, &lm.member, &id, draft, extra)
 }
 
-async fn send(helper: &Helper, room: &str, identity: &str, draft: DraftWire) -> Result<SendResult> {
+pub(super) async fn send(
+    helper: &Helper,
+    room: &str,
+    identity: &str,
+    draft: DraftWire,
+) -> Result<SendResult> {
     let room = helper.store.room(room)?;
     let lm = local_member(helper, &room, identity)?;
     if room.closed {
@@ -691,22 +805,32 @@ async fn send(helper: &Helper, room: &str, identity: &str, draft: DraftWire) -> 
         let outcome = tokio::time::timeout(SEND_WAIT, async {
             let _guard = lock.lock().await;
             if let Some(done) = helper.store.message_by_id(&msg.id)? {
-                return Ok(done);
+                return Ok(Outcome::Sequenced(Box::new(done)));
             }
-            super::peers::submit(helper, &room, &link, &msg).await
+            Ok::<_, Error>(super::outbox::submit(helper, &room, &link, &msg).await)
         })
         .await;
         match outcome {
-            Ok(Ok(sequenced)) => {
+            Ok(Ok(Outcome::Sequenced(sequenced))) => {
                 return Ok(SendResult {
-                    message: sequenced,
+                    message: *sequenced,
                     delivered: true,
                 })
             }
-            Ok(Err(Error::ReachedNobody(_))) | Err(_) => {}
-            Ok(Err(e)) => {
+            // Not reached, or no answer in time: it stays queued and goes
+            // when the home is back.
+            Ok(Ok(Outcome::Temporary {
+                class: "transport" | "local",
+                ..
+            }))
+            | Err(_) => {}
+            // The sender is right here: tell them now and do not queue.
+            Ok(Ok(Outcome::Temporary { error, .. }))
+            | Ok(Ok(Outcome::Definitive(error)))
+            | Ok(Ok(Outcome::Unknown(error)))
+            | Ok(Err(error)) => {
                 helper.store.outbox_remove(&msg.id)?;
-                return Err(e);
+                return Err(error);
             }
         }
     }
@@ -775,7 +899,12 @@ fn wanted(m: &Message, me: &str) -> bool {
 
 /// Wait for the next message from someone else. Skips your own and
 /// housekeeping, moving the bookmark past them.
-async fn next(helper: &Helper, room: &str, identity: &str, timeout_secs: u64) -> Result<Message> {
+pub(super) async fn next(
+    helper: &Helper,
+    room: &str,
+    identity: &str,
+    timeout_secs: u64,
+) -> Result<Message> {
     let room = helper.store.room(room)?;
     let lm = local_member(helper, &room, identity)?;
     let reader = lm.member.name.clone();
@@ -803,7 +932,7 @@ async fn next(helper: &Helper, room: &str, identity: &str, timeout_secs: u64) ->
 /// the last message returned. A read from a given `since` is a look back:
 /// it leaves the bookmark where it is, so a web page or a script paging
 /// through the log never makes an agent miss or repeat a message.
-async fn read(
+pub(super) async fn read(
     helper: &Helper,
     room: &str,
     identity: &str,
@@ -911,6 +1040,11 @@ async fn who(helper: &Helper, room: &str) -> Result<Vec<WhoEntry>> {
     Ok(out)
 }
 
+#[cfg(test)]
+pub(super) async fn control_for_test(helper: &Helper, room: &str, identity: &str, op: ControlOp) {
+    control(helper, room, identity, op).await.unwrap();
+}
+
 /// Owner ops. Sent as a control message; applied once sequenced.
 async fn control(helper: &Helper, room: &str, identity: &str, op: ControlOp) -> Result<SendResult> {
     let r = helper.store.room(room)?;
@@ -942,7 +1076,7 @@ async fn control(helper: &Helper, room: &str, identity: &str, op: ControlOp) -> 
 
 /// Exit 0 if a valid, unexpired, unused human approve exists for exactly
 /// this action. Spends it: one approve, one deed.
-async fn check_approve(
+pub(super) async fn check_approve(
     helper: &Helper,
     room: &str,
     action: &diavlos_core::Action,
