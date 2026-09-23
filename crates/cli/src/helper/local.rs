@@ -1583,7 +1583,7 @@ async fn spend_at_home(
         Err(e) => Err(Error::ReachedNobody(format!(
             "no answer from the room's home ({e}). The spend may or may not be recorded: run \
              the check again, and the same operation gets the recorded answer. (A home running \
-             a diavlos older than 1.2 cannot record spends at all; it needs upgrading.)"
+             a diavlos older than 2.0 cannot record spends at all; it needs upgrading.)"
         ))),
     }
 }

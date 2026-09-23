@@ -49,7 +49,7 @@ code (September 23, 2026).
   It must deduplicate on the operation id and reconcile. And one action
   hash can describe a legitimate repeat, so name the specific operation in
   the action.
-- **A helper older than 1.2 still spends approves on its own**, without
+- **A helper older than 2.0 still spends approves on its own**, without
   asking the home, and the home cannot see that. Upgrade every helper that
   runs `check-approve`.
 - **Delivery is at least once.** A message can arrive twice (a lease that
