@@ -4,7 +4,7 @@ A GitHub Action that lets a workflow post into a room, or ask a human for a
 signed approval and wait for it.
 
 ```yaml
-- uses: harisnopen/diavlos@v1
+- uses: harisnopen/diavlos@v2.0.0
   with:
     room: ops
     text: "Build 4711 is green."
@@ -24,7 +24,7 @@ directory between runs. This is the one to use.
     path: ~/.diavlos-ci
     key: diavlos-${{ github.repository }}-ops
 
-- uses: harisnopen/diavlos@v1
+- uses: harisnopen/diavlos@v2.0.0
   with:
     home: ~/.diavlos-ci
     invite: ${{ secrets.DIAVLOS_INVITE }}   # used only on the first run
@@ -66,7 +66,7 @@ jobs:
           key: diavlos-${{ github.repository }}-ops
 
       - id: approval
-        uses: harisnopen/diavlos@v1
+        uses: harisnopen/diavlos@v2.0.0
         with:
           home: ~/.diavlos-ci
           identity: ci

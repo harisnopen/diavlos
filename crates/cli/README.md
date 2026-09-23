@@ -358,7 +358,7 @@ See [SECURITY.md](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md) a
   and name the specific operation in the action (a ticket, a revision, a
   target) so one approve means one operation.
 - **Upgrade every helper that runs `check-approve`.** A helper older than
-  1.2 still spends approves on its own, without asking the room's home.
+  2.0 still spends approves on its own, without asking the room's home.
 - **Delivery is at least once.** A message can arrive twice: a lease that
   ran out while the worker was still busy, a bridge that crashed after
   posting. Dedupe by message id.

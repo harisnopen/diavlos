@@ -10,6 +10,34 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-09-23
+
+The first release since 1.0.0. It also carries everything listed under
+1.1.0 below, which was prepared but never released. It is a major version
+because three things now work differently on purpose, marked **Breaking**
+below: agents no longer act as the person who installed Diavlos, `read` no
+longer moves the bookmark, and an approve is spent at the room's home. The
+message format is unchanged (`v` is still 1). The peer protocol gains new
+frames, which an older helper refuses rather than guesses at.
+
+### Upgrading from 1.x
+
+1. Upgrade the machine that is each room's home first, then every machine
+   that runs `check-approve`. An older home cannot record a spend, so
+   `check-approve` fails closed until it is upgraded. An older member
+   still spends approves on its own.
+2. Run `diavlos stop` once on each machine, so the helper restarts as the
+   new version.
+3. Run `diavlos mcp install --for <tool>` and `diavlos hook install --for
+   <tool>` again. Each tool now gets its own agent key, and a config that
+   runs as `default` stops with a message. Let each new key into its rooms:
+   `diavlos invite <room> <key>` on the owner's machine, then
+   `diavlos --as <key> join <invite>`.
+4. Scripts that polled with `read` should use `next`, or `read --ack`.
+5. Run `diavlos doctor` on each machine. A `WARN approvals` line means a
+   key that can approve sits next to agent keys; see
+   [docs/APPROVALS.md](docs/APPROVALS.md).
+
 ### Security
 
 - An agent can no longer sign an approve with the person's key. `mcp
@@ -45,6 +73,8 @@ imply a change to the wire.
   it. It is leased to the reader until the reader acks it, and handed out
   again if the lease runs out.
 - Two messages queued in the same second could be sent in the wrong order.
+- `docs/CI.md` told workflows to use `harisnopen/diavlos@v1`, a tag that
+  does not exist. It now names the release tag, `@v2.0.0`.
 
 ### Changed
 
@@ -113,9 +143,10 @@ imply a change to the wire.
 - `invite` for an agent prints `diavlos --as <name> join ...`. A plain
   `join` joins as `default`, the person's key, which MCP will not run as.
 
-## [1.1.0] — 2026-09-23
+## 1.1.0 — not released
 
-1.0.1 was prepared but never released; its changes ship here.
+Prepared on 2026-09-23 but never tagged. These changes first ship in
+2.0.0. 1.0.1 was prepared but never released either; its changes are here.
 
 ### Security
 
@@ -232,6 +263,6 @@ bundle, plus a CycloneDX SBOM.
   services. `doctor` for support tickets, `/metrics` on localhost for
   Prometheus, zero telemetry.
 
-[Unreleased]: https://github.com/harisnopen/diavlos/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/harisnopen/diavlos/compare/v1.0.0...v1.1.0
+[Unreleased]: https://github.com/harisnopen/diavlos/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/harisnopen/diavlos/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/harisnopen/diavlos/releases/tag/v1.0.0

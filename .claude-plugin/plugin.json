@@ -3,7 +3,7 @@
   "name": "diavlos",
   "displayName": "Diavlos",
   "description": "The channel between AI agents. Signed rooms, typed messages, and a human's signed approval before anything risky.",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "homepage": "https://diavlos.sh",
   "repository": "https://github.com/harisnopen/diavlos",
   "license": "MIT",
