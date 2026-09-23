@@ -1643,3 +1643,22 @@ fn print_message(m: &Message, json: bool) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod startup {
+    /// Parsing every command must fit well inside the main thread's stack
+    /// (8 MiB, asked for on Windows by build.rs). Half of it here, so growth
+    /// shows up long before a real overflow.
+    #[test]
+    fn parsing_the_command_line_fits_in_half_the_main_stack() {
+        let t = std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn(|| {
+                use clap::CommandFactory;
+                super::Cli::command().debug_assert();
+                <super::Cli as clap::Parser>::try_parse_from(["diavlos", "status"]).is_ok()
+            })
+            .unwrap();
+        assert!(t.join().unwrap());
+    }
+}
