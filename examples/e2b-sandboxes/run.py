@@ -24,6 +24,7 @@ the helpers find each other through relays.
 import argparse
 import json
 import os
+import platform
 import secrets
 import shutil
 import subprocess
@@ -36,6 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 AGENTS = os.path.join(HERE, "agents")
 BIN = os.environ.get("DIAVLOS_BIN") or shutil.which("diavlos") or "diavlos"
 AGENT_NAMES = ("planner", "runner")
+BINDING = os.path.join(HERE, "..", "..", "bindings", "python", "diavlos")
 
 
 def log(*a):
@@ -96,7 +98,7 @@ class E2BBox:
 
     HOME = "/home/user"
 
-    def __init__(self, template, name):
+    def __init__(self, template, name, upload=False):
         from e2b import Sandbox
         self.name = name
         self.sbx = Sandbox.create(template=template, timeout=1200, metadata={"diavlos": name})
@@ -104,24 +106,40 @@ class E2BBox:
         for f in ("planner.py", "runner.py", "job.py"):
             with open(os.path.join(AGENTS, f)) as fh:
                 self.sbx.files.write(f"{self.HOME}/agents/{f}", fh.read())
+        self.bin, self.env = "diavlos", {}
+        if upload:
+            # Same diavlos and Python binding as this machine, so every helper
+            # in the room speaks the same version.
+            with open(BIN, "rb") as fh:
+                self.sbx.files.write(f"{self.HOME}/bin/diavlos", fh.read())
+            for f in os.listdir(BINDING):
+                if f.endswith(".py"):
+                    with open(os.path.join(BINDING, f)) as fh:
+                        self.sbx.files.write(f"{self.HOME}/py/diavlos/{f}", fh.read())
+            self.sh(f"chmod +x {self.HOME}/bin/diavlos")
+            self.bin = f"{self.HOME}/bin/diavlos"
+            self.env = {"DIAVLOS_BIN": self.bin, "PYTHONPATH": f"{self.HOME}/py"}
+        log(f"{name}: " + self.sh(f"{self.bin} --version").strip())
         self.script = None
         self._stop = threading.Event()
         # Start the helper as its own long-lived process and wait for its socket.
-        self.sh(f"setsid nohup diavlos helper > {self.HOME}/helper.log 2>&1 < /dev/null &")
+        self.sh(f"setsid -f {self.bin} helper > {self.HOME}/helper.log 2>&1 < /dev/null")
         self.sh(f"for i in $(seq 100); do [ -S {self.HOME}/.diavlos/helper.sock ] && exit 0; sleep 0.1; done; "
                 f"cat {self.HOME}/helper.log; exit 1")
 
     def sh(self, cmd, envs=None, timeout=60):
-        return self.sbx.commands.run(cmd, envs=envs, timeout=timeout).stdout
+        return self.sbx.commands.run(cmd, envs={**self.env, **(envs or {})}, timeout=timeout).stdout
 
     def join(self, agent, inv):
-        self.sh(f'diavlos --as {agent} join "$INVITE"', envs={"INVITE": inv})
+        self.sh(f'{self.bin} --as {agent} join "$INVITE"', envs={"INVITE": inv})
 
     def start(self, script, envs):
         self.script = script
         path = f"{self.HOME}/agents/{script}"
-        self.sh(f"cd {self.HOME}/agents && setsid nohup sh -c 'python3 -u {path}; echo $? > {path}.rc' "
-                f"> {path}.log 2>&1 < /dev/null &", envs=envs)
+        # setsid -f: the job leaves this command's session, so the command
+        # returns at once instead of waiting on the job's open output.
+        self.sh(f"setsid -f sh -c 'cd {self.HOME}/agents && python3 -u {path}; echo $? > {path}.rc' "
+                f"> {path}.log 2>&1 < /dev/null", envs=envs)
         threading.Thread(target=self._tail, args=(f"{path}.log",), daemon=True).start()
 
     def _tail(self, path):
@@ -149,7 +167,7 @@ class E2BBox:
 
     def dump(self):
         """What happened inside, for when something went wrong."""
-        out = self.sh(f"tail -n 30 {self.HOME}/helper.log; echo ---; diavlos status 2>&1 | tail -n 20; "
+        out = self.sh(f"tail -n 30 {self.HOME}/helper.log; echo ---; {self.bin} status 2>&1 | tail -n 20; "
                       f"echo ---; ls {self.HOME}/agents; tail -n 30 {self.HOME}/agents/*.log 2>/dev/null; true")
         for line in out.splitlines():
             print(f"  {self.name} (debug) | {line}", flush=True)
@@ -178,6 +196,8 @@ def main():
     ap.add_argument("--template", default=os.environ.get("E2B_TEMPLATE", "diavlos-agents"))
     ap.add_argument("--auto-approve", action="store_true")
     ap.add_argument("--deny", action="store_true", help="say no, to see the gate hold")
+    ap.add_argument("--template-diavlos", action="store_true",
+                    help="use the diavlos installed in the template, not a copy of this machine's")
     args = ap.parse_args()
 
     base = tempfile.mkdtemp(prefix="dve-", dir="/tmp" if os.path.isdir("/tmp") else None)
@@ -202,7 +222,9 @@ def main():
             owner_env["USER"] = owner_env["USERNAME"] = "human"
         cli(host, "new", room, "--about", "two E2B sandboxes, one human gate", env=owner_env)
         log(f"made room {room}; you are the owner and the approver")
-        make = (lambda n: LocalBox(base, n)) if args.local else (lambda n: E2BBox(args.template, n))
+        upload = (not args.template_diavlos and sys.platform == "linux"
+                  and platform.machine() == "x86_64" and os.path.isdir(BINDING))
+        make = (lambda n: LocalBox(base, n)) if args.local else (lambda n: E2BBox(args.template, n, upload))
         a, b = make("sandbox-a"), make("sandbox-b")
         boxes = [a, b]
         a.join("planner", invite(host, room, "planner"))
