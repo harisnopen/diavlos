@@ -88,7 +88,13 @@ class LocalBox:
 
 
 class E2BBox:
-    """A real E2B sandbox from the `diavlos-agents` template."""
+    """A real E2B sandbox from the `diavlos-agents` template.
+
+    Everything long-lived (the helper, the agent) runs as a detached
+    background job with its output in a log file, which a thread copies to
+    this terminal. E2B commands themselves stay short."""
+
+    HOME = "/home/user"
 
     def __init__(self, template, name):
         from e2b import Sandbox
@@ -97,35 +103,59 @@ class E2BBox:
         log(f"{name}: E2B sandbox {self.sbx.sandbox_id}")
         for f in ("planner.py", "runner.py", "job.py"):
             with open(os.path.join(AGENTS, f)) as fh:
-                self.sbx.files.write(f"/home/user/agents/{f}", fh.read())
-        # Keep the helper as a process of its own, so it outlives each command.
-        self.sbx.commands.run("diavlos helper", background=True, timeout=0)
-        self.handle = None
+                self.sbx.files.write(f"{self.HOME}/agents/{f}", fh.read())
+        self.script = None
+        self._stop = threading.Event()
+        # Start the helper as its own long-lived process and wait for its socket.
+        self.sh(f"setsid nohup diavlos helper > {self.HOME}/helper.log 2>&1 < /dev/null &")
+        self.sh(f"for i in $(seq 100); do [ -S {self.HOME}/.diavlos/helper.sock ] && exit 0; sleep 0.1; done; "
+                f"cat {self.HOME}/helper.log; exit 1")
+
+    def sh(self, cmd, envs=None, timeout=60):
+        return self.sbx.commands.run(cmd, envs=envs, timeout=timeout).stdout
 
     def join(self, agent, inv):
-        self.sbx.commands.run(f'diavlos --as {agent} join "$INVITE"', envs={"INVITE": inv}, timeout=60)
+        self.sh(f'diavlos --as {agent} join "$INVITE"', envs={"INVITE": inv})
 
     def start(self, script, envs):
-        out = lambda line: print(f"  {self.name} | {line}", end="" if line.endswith("\n") else "\n", flush=True)  # noqa: E731
-        self.handle = self.sbx.commands.run(f"python3 -u /home/user/agents/{script}", background=True,
-                                            envs=envs, cwd="/home/user/agents", timeout=0,
-                                            on_stdout=out, on_stderr=out)
+        self.script = script
+        path = f"{self.HOME}/agents/{script}"
+        self.sh(f"cd {self.HOME}/agents && setsid nohup sh -c 'python3 -u {path}; echo $? > {path}.rc' "
+                f"> {path}.log 2>&1 < /dev/null &", envs=envs)
+        threading.Thread(target=self._tail, args=(f"{path}.log",), daemon=True).start()
+
+    def _tail(self, path):
+        seen = 0
+        while not self._stop.is_set():
+            try:
+                text = self.sbx.files.read(path)
+            except Exception:
+                text = ""
+            for line in text.splitlines()[seen:]:
+                print(f"  {self.name} | {line}", flush=True)
+            seen = max(seen, len(text.splitlines()))
+            time.sleep(1)
 
     def wait(self, timeout):
-        from e2b import CommandExitException
-        result = [None]
+        rc_file = f"{self.HOME}/agents/{self.script}.rc"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out = self.sh(f"cat {rc_file} 2>/dev/null || true").strip()
+            if out:
+                time.sleep(1.5)   # let the tail thread print the last lines
+                return int(out)
+            time.sleep(1)
+        return None
 
-        def w():
-            try:
-                result[0] = self.handle.wait().exit_code
-            except CommandExitException as e:
-                result[0] = e.exit_code
-        t = threading.Thread(target=w, daemon=True)
-        t.start()
-        t.join(timeout)
-        return result[0]
+    def dump(self):
+        """What happened inside, for when something went wrong."""
+        out = self.sh(f"tail -n 30 {self.HOME}/helper.log; echo ---; diavlos status 2>&1 | tail -n 20; "
+                      f"echo ---; ls {self.HOME}/agents; tail -n 30 {self.HOME}/agents/*.log 2>/dev/null; true")
+        for line in out.splitlines():
+            print(f"  {self.name} (debug) | {line}", flush=True)
 
     def close(self):
+        self._stop.set()
         self.sbx.kill()
 
 
@@ -177,7 +207,7 @@ def main():
         boxes = [a, b]
         a.join("planner", invite(host, room, "planner"))
         b.join("runner", invite(host, room, "runner"))
-        print(cli(host, "who", room))
+        print(cli(host, "who", room), flush=True)
 
         b.start("runner.py", {"DIAVLOS_ROOM": room, "DIAVLOS_ME": "runner", "SANDBOX_NAME": b.name})
         time.sleep(1)
@@ -212,6 +242,11 @@ def main():
         log(f"bundle kept at {bundle}")
     finally:
         for box in boxes:
+            if rc != 0 and hasattr(box, "dump"):
+                try:
+                    box.dump()
+                except Exception as e:  # the sandbox may already be gone
+                    log(f"{box.name}: no debug output ({e})")
             box.close()
         if args.local:
             subprocess.run([BIN, "--home", host, "stop"], capture_output=True)
