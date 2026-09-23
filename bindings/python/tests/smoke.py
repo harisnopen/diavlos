@@ -7,7 +7,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from diavlos import Room, DiavlosError  # noqa: E402
+from diavlos import Room, DiavlosError, Message  # noqa: E402
 
 BIN = os.environ.get("DIAVLOS_BIN", "diavlos")
 
@@ -65,6 +65,21 @@ def main():
 
         log = room.read(since=1, limit=100)
         assert any(x.text == "did x" for x in log)
+
+        try:
+            from diavlos.sigcheck import KeyRing
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as e:  # missing, or a broken build that panics on import
+            print(f"python smoke: sigcheck skipped (cryptography unusable: {type(e).__name__})")
+        else:
+            keys = KeyRing.load("ops", name="pybot", home=b)
+            assert {w["name"]: w["fingerprint"] for w in who} == keys.fingerprints
+            assert all(keys.check(x)[0] for x in log), "a real signature failed"
+            bad = Message(log[-1], text=log[-1].text + "!")
+            assert not keys.check(bad)[0], "a changed message passed"
+            bad = Message(log[-1], **{"from": "haris" if log[-1]["from"] == "pybot" else "pybot"})
+            assert not keys.check(bad)[0], "a relabelled sender passed"
         print("python smoke: ok")
     finally:
         for h in (a, b):
