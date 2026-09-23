@@ -25,7 +25,16 @@ impl Home {
         // Short on purpose: the helper's socket path lives inside it.
         let dir = std::env::temp_dir().join(format!("dvs-{tag}-{}", nanos()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.toml"), "[helper]\npublic_relays = false\n").unwrap();
+        // Keys as plain files on every platform. With the OS keychain on
+        // (macOS and Windows runners have one), a key file holds only a
+        // marker and the secret sits in the keychain under its label, so a
+        // copied file is not a copied key. It also keeps these tests out of
+        // the runner's real keychain.
+        std::fs::write(
+            dir.join("config.toml"),
+            "[helper]\npublic_relays = false\nkeychain = false\n",
+        )
+        .unwrap();
         Home { dir }
     }
 
