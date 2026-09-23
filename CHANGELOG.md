@@ -98,6 +98,13 @@ imply a change to the wire.
 - Error frames between helpers say whether a failure is temporary or
   definitive (`fate`) and when trying again can work (`retry_after`).
   Older helpers ignore both.
+- A warning when a key that can say yes sits on the same machine as agent
+  keys: an approver's key, or the room owner's, which can invite a new
+  human. `doctor` shows it as `WARN` (its exit code does not change),
+  `status` lists it, and `check-approve` prints it when it passes. The
+  status result has `approval_risks`, the check-approve result `risk`.
+- [docs/APPROVALS.md](docs/APPROVALS.md): how to keep the room's home, its
+  owner key and the approver keys on a machine the agents cannot reach.
 
 ## [1.1.0] — 2026-09-23
 

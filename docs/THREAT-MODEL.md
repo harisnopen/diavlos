@@ -36,10 +36,14 @@ code (September 23, 2026).
   `diavlos` with your key or read the key file; the keychain protects the
   key at rest, not the helper's willingness to sign with it. Opening the web
   UI from another device does not help while the key stays on this machine.
-  Approvals that must hold against your own agents need the human key where
-  the agent cannot reach it, with signing that requires a person: another
-  device, or another OS user whose socket, keys and privileges the agent
-  cannot touch.
+  Approvals that must hold against your own agents need every key that can
+  say yes where the agent cannot reach it, with signing that requires a
+  person: another device, or another OS user whose socket, keys and
+  privileges the agent cannot touch. The owner's key counts even when it
+  cannot approve, since it can invite a new human. [APPROVALS.md](APPROVALS.md)
+  is the setup. `diavlos doctor`, `status` and `check-approve` warn when
+  such a key sits in the same Diavlos home as agent keys; they cannot see a
+  second home or a copied key.
 - **A spend is permission for one operation, not proof it ran once.** A
   crash after the spend and before the change leaves the executor unsure.
   It must deduplicate on the operation id and reconcile. And one action

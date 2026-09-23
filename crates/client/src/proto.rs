@@ -308,6 +308,81 @@ pub struct StatusResult {
     pub encrypted_inbox: bool,
     #[serde(default)]
     pub metrics_addr: Option<String>,
+    /// Rooms whose approvals are only as safe as this machine, because a key
+    /// that can approve in them, or their owner key, is here with agent keys.
+    #[serde(default)]
+    pub approval_risks: Vec<ApprovalRisk>,
+}
+
+/// A key that can say yes in a room lives on the same machine as agent keys.
+/// An agent with a shell can use any key on its machine, so for that room an
+/// approve proves no more than that something on this machine signed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRisk {
+    pub room: String,
+    /// Local key labels that can approve in the room now.
+    #[serde(default)]
+    pub approvers: Vec<String>,
+    /// The local key label that owns the room, if it is here. The owner can
+    /// invite a new member marked human, and approve through it.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Agent key labels on this machine, in any room or none yet.
+    #[serde(default)]
+    pub agents: Vec<String>,
+}
+
+impl ApprovalRisk {
+    /// One paragraph a person can act on.
+    pub fn describe(&self) -> String {
+        let quote = |v: &[String]| {
+            v.iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut held = Vec::new();
+        match &self.owner {
+            Some(o) if self.approvers.contains(o) => {
+                held.push(format!(
+                    "the key `{o}`, which owns the room and can approve"
+                ));
+                let others: Vec<String> =
+                    self.approvers.iter().filter(|a| *a != o).cloned().collect();
+                if !others.is_empty() {
+                    held.push(format!("the approver keys {}", quote(&others)));
+                }
+            }
+            owner => {
+                if !self.approvers.is_empty() {
+                    held.push(format!(
+                        "the approver key{} {}",
+                        if self.approvers.len() == 1 { "" } else { "s" },
+                        quote(&self.approvers)
+                    ));
+                }
+                if let Some(o) = owner {
+                    held.push(format!(
+                        "the owner key `{o}`, which can invite a new human member"
+                    ));
+                }
+            }
+        }
+        let plural = held.len() > 1;
+        format!(
+            "approvals in {} are only as safe as this machine. The agent key{} {} {} here, and \
+             so {} {}. An agent with a shell here can use {}. Keep the room's home, its owner \
+             key and every approver key on a machine the agents cannot reach: see \
+             docs/APPROVALS.md.",
+            self.room,
+            if self.agents.len() == 1 { "" } else { "s" },
+            quote(&self.agents),
+            if self.agents.len() == 1 { "is" } else { "are" },
+            if plural { "are" } else { "is" },
+            held.join(" and "),
+            if plural { "them" } else { "it" },
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -354,6 +429,10 @@ pub struct CheckApproveResult {
     pub spent_at: String,
     #[serde(default)]
     pub audit_seq: u64,
+    /// Set when the key that can say yes in this room shares this machine
+    /// with agent keys: the approve is then no stronger than this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<ApprovalRisk>,
 }
 
 fn default_identity() -> String {

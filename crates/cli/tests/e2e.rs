@@ -366,3 +366,29 @@ fn an_approve_is_spent_once_at_the_home_whoever_asks() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     b.fails_with(&["--as", "fixer", "check-approve", "ops", action], 3);
 }
+
+#[test]
+fn doctor_warns_when_a_key_that_can_say_yes_sits_with_agents() {
+    let a = Home::new("warn", "haris");
+    a.ok(&["new", "ops"]);
+    let alone = a.run(&["doctor"]);
+    let alone = String::from_utf8_lossy(&alone.stdout).to_string();
+    assert!(!alone.contains("WARN"), "{alone}");
+
+    // An agent joins from this same machine: the owner key, which can
+    // approve, now sits with it.
+    let inv = invite_token(&a.ok(&["invite", "ops", "worker"]));
+    a.ok(&["--as", "worker", "join", &inv]);
+    let out = a.run(&["doctor"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("WARN approvals ops") && text.contains("only as safe as this machine"),
+        "{text}"
+    );
+    // A warning, not a failure: the exit code is what it was without it.
+    let alone_code = if alone.contains("FAIL") { 1 } else { 0 };
+    assert_eq!(out.status.code(), Some(alone_code), "{text}");
+    let st = a.ok(&["status"]);
+    assert!(st.contains("! approvals in ops"), "{st}");
+    a.ok(&["stop"]);
+}

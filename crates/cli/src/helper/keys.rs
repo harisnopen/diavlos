@@ -39,6 +39,27 @@ struct Stub {
     secret_in_keychain: bool,
 }
 
+/// Every key file here and its kind, read from the file alone: no secret is
+/// loaded, from the file or the keychain. Unreadable files are skipped.
+pub fn key_kinds(paths: &Paths) -> Vec<(String, diavlos_core::Kind)> {
+    let Ok(dir) = std::fs::read_dir(paths.keys_dir()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, diavlos_core::Kind)> = dir
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| {
+            let label = e.path().file_stem()?.to_string_lossy().to_string();
+            let text = std::fs::read_to_string(e.path()).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let kind = serde_json::from_value(v.get("kind")?.clone()).ok()?;
+            Some((label, kind))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 pub fn save_identity(paths: &Paths, label: &str, id: &Identity, keychain: bool) -> Result<()> {
     let path = paths.key(label);
     if keychain && keychain_available() {

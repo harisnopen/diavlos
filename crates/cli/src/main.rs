@@ -1130,6 +1130,9 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                 "approved by {} ({}), valid until {}. Spent for operation {} (audit seq {}).",
                 r.approved_by, r.approve_id, r.expires, r.op_id, r.audit_seq
             );
+            if let Some(risk) = &r.risk {
+                eprintln!("warning: {}", risk.describe());
+            }
             Ok(0)
         }
         Cmd::Pause { room } => {
@@ -1371,6 +1374,9 @@ matches `diavlos who`, or pass --owner."
                 if r.quarantined_deliveries > 0 {
                     println!("  {:<20} see: diavlos deliveries {} --all", "", r.name);
                 }
+            }
+            for risk in &s.approval_risks {
+                println!("\n  ! {}", risk.describe());
             }
             Ok(0)
         }

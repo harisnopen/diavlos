@@ -9,6 +9,9 @@ use crate::config::Config;
 
 pub async fn run(paths: &Paths) -> Value {
     let mut checks = Vec::new();
+    // A warning is something to fix before trusting approvals, not a broken
+    // setup: it shows, and it does not fail `doctor`.
+    let mut warnings = Vec::new();
     let mut check = |name: &str, ok: bool, detail: String| {
         checks.push(json!({"check": name, "ok": ok, "detail": detail}));
     };
@@ -188,6 +191,14 @@ pub async fn run(paths: &Paths) -> Value {
                     .map(|a| a.len())
                     .unwrap_or(0);
                 check("sockets", addrs > 0, format!("{addrs} bound"));
+                for risk in &s.approval_risks {
+                    warnings.push(json!({
+                        "check": format!("approvals {}", risk.room),
+                        "ok": true,
+                        "warn": true,
+                        "detail": risk.describe(),
+                    }));
+                }
                 for r in &s.rooms {
                     check(
                         &format!("room {}", r.name),
@@ -225,14 +236,18 @@ pub async fn run(paths: &Paths) -> Value {
     }
     check("time", true, diavlos_core::message::now_ts());
     let all_ok = checks.iter().all(|c| c["ok"].as_bool().unwrap_or(false));
-    json!({"ok": all_ok, "checks": checks})
+    let warned = warnings.len();
+    checks.extend(warnings);
+    json!({"ok": all_ok, "warnings": warned, "checks": checks})
 }
 
 pub fn print(report: &Value) {
     for c in report["checks"].as_array().cloned().unwrap_or_default() {
         println!(
             "{} {:<18} {}",
-            if c["ok"].as_bool().unwrap_or(false) {
+            if c["warn"].as_bool().unwrap_or(false) {
+                "WARN"
+            } else if c["ok"].as_bool().unwrap_or(false) {
                 "ok  "
             } else {
                 "FAIL"

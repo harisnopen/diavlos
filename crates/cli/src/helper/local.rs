@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use diavlos_client::proto::{
-    AskResult, CheckApproveResult, DeliveryInfo, DeliveryItem, DraftWire, ExportResult,
-    HelloResult, InviteResult, JoinResult, NextResult, OutboxItem, ReadResult, Request, Response,
-    RoomStatus, RotateResult, SendResult, StatusResult, WhoEntry, WhoamiResult,
+    ApprovalRisk, AskResult, CheckApproveResult, DeliveryInfo, DeliveryItem, DraftWire,
+    ExportResult, HelloResult, InviteResult, JoinResult, NextResult, OutboxItem, ReadResult,
+    Request, Response, RoomStatus, RotateResult, SendResult, StatusResult, WhoEntry, WhoamiResult,
 };
 use diavlos_client::Paths;
 use diavlos_core::{
@@ -428,7 +428,77 @@ async fn status(helper: &Helper) -> Result<StatusResult> {
         network: helper.net.network_info(),
         encrypted_inbox: helper.store.is_encrypted(),
         metrics_addr: helper.metrics_addr.clone(),
+        approval_risks: approval_risks(helper, None)?,
     })
+}
+
+/// Rooms where a key that can say yes shares this machine with agent keys.
+///
+/// Agent keys are any key file here that is not a person's, joined or not:
+/// `mcp install` makes one per tool before it is let into a room, and an
+/// agent with a shell can use every key on its machine, not only the rooms
+/// its own key is in. The keys that can say yes in a room are the ones that
+/// can approve there now, and the owner key, which can invite a new member
+/// marked human and approve through it.
+pub(super) fn approval_risks(
+    helper: &Helper,
+    only_room: Option<&str>,
+) -> Result<Vec<ApprovalRisk>> {
+    let mut agents: std::collections::BTreeSet<String> = super::keys::key_kinds(&helper.paths)
+        .into_iter()
+        .filter(|(_, kind)| *kind != Kind::Human)
+        .map(|(label, _)| label)
+        .collect();
+    let rooms = helper.store.list_rooms()?;
+    for room in &rooms {
+        for lm in helper.store.local_members(&room.id)? {
+            if lm.member.kind != Kind::Human && !lm.member.revoked {
+                agents.insert(lm.identity);
+            }
+        }
+    }
+    let now = now_ts();
+    let mut out = Vec::new();
+    for room in rooms {
+        if room.closed || only_room.is_some_and(|r| r != room.id && r != room.name) {
+            continue;
+        }
+        let local = helper.store.local_members(&room.id)?;
+        let approvers: Vec<String> = local
+            .iter()
+            .filter(|lm| {
+                lm.member.kind == Kind::Human
+                    && lm
+                        .member
+                        .check_may_send(MessageType::Approve, lm.member.key == room.owner, &now)
+                        .is_ok()
+            })
+            .map(|lm| lm.identity.clone())
+            .collect();
+        let owner = local
+            .iter()
+            .find(|lm| lm.member.key == room.owner)
+            .map(|lm| lm.identity.clone());
+        if approvers.is_empty() && owner.is_none() {
+            continue;
+        }
+        // The keys that can say yes are not the agents they are kept from.
+        let others: Vec<String> = agents
+            .iter()
+            .filter(|a| !approvers.contains(a) && owner.as_ref() != Some(a))
+            .cloned()
+            .collect();
+        if others.is_empty() {
+            continue;
+        }
+        out.push(ApprovalRisk {
+            room: room.name,
+            approvers,
+            owner,
+            agents: others,
+        });
+    }
+    Ok(out)
 }
 
 fn outbox_item(helper: &Helper, e: diavlos_core::OutboxEntry) -> OutboxItem {
@@ -1425,6 +1495,7 @@ pub(super) async fn check_approve(
                     op_id: record.op_id,
                     spent_at: record.at,
                     audit_seq: record.audit_seq,
+                    risk: approval_risks(helper, Some(&room.id))?.into_iter().next(),
                 });
             }
             // Spent before by another operation; this helper had not heard.
@@ -2139,6 +2210,171 @@ mod spend_tests {
             .unwrap();
         assert_eq!(got.op_id, recorded.op_id);
         assert_eq!(audit_events(&home, &w.room_id, &approve), 1);
+    }
+}
+
+#[cfg(test)]
+mod approval_risk_tests {
+    use super::*;
+    use crate::helper::testkit::{helper, room_with, TempHome};
+
+    fn risks(h: &Helper) -> Vec<ApprovalRisk> {
+        approval_risks(h, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_owner_with_an_agent_on_the_same_machine_is_a_risk() {
+        let dir = TempHome::new("risk1");
+        let h = helper("home", &dir, None);
+        room_with(&h, "ops", &[(&h, "worker", "worker", false)]).await;
+        let r = risks(&h);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].room, "ops");
+        assert_eq!(r[0].approvers, vec!["default".to_string()]);
+        assert_eq!(r[0].owner.as_deref(), Some("default"));
+        assert_eq!(r[0].agents, vec!["worker".to_string()]);
+        let said = r[0].describe();
+        assert!(
+            said.contains("`default`, which owns the room and can approve"),
+            "{said}"
+        );
+        assert!(said.contains("`worker`"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn an_agent_key_counts_before_it_joins_anything() {
+        // `mcp install` makes a key per tool before it is let into a room.
+        let dir = TempHome::new("risk2");
+        let h = helper("home", &dir, None);
+        room_with(&h, "ops", &[]).await;
+        assert!(risks(&h).is_empty(), "a person alone is fine");
+        h.identity("claude-code").await.unwrap();
+        let r = risks(&h);
+        assert_eq!(r[0].agents, vec!["claude-code".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn keys_that_can_say_yes_kept_away_from_the_agents_are_no_risk() {
+        // The gate machine: the room's home, its owner and a human approver.
+        // The agents: another machine, with agent keys only.
+        let dirs = (TempHome::new("gate"), TempHome::new("agents"));
+        let gate = helper("gate", &dirs.0, None);
+        let agents = helper("agents", &dirs.1, None);
+        room_with(
+            &gate,
+            "ops",
+            &[
+                (&gate, "alice", "alice", true),
+                (&agents, "worker", "worker", false),
+                (&agents, "deployer", "deployer", false),
+            ],
+        )
+        .await;
+        assert!(risks(&gate).is_empty(), "{:?}", risks(&gate));
+        assert!(risks(&agents).is_empty(), "{:?}", risks(&agents));
+    }
+
+    #[tokio::test]
+    async fn a_human_approver_joined_from_the_agents_machine_is_a_risk() {
+        let dirs = (TempHome::new("gate"), TempHome::new("agents"));
+        let gate = helper("gate", &dirs.0, None);
+        let agents = helper("agents", &dirs.1, None);
+        room_with(
+            &gate,
+            "ops",
+            &[
+                (&agents, "alice", "alice", true),
+                (&agents, "worker", "worker", false),
+            ],
+        )
+        .await;
+        let r = risks(&agents);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].approvers, vec!["alice".to_string()]);
+        assert_eq!(r[0].owner, None);
+        assert!(r[0].describe().contains("the approver key `alice`"));
+        // A person who can no longer approve there is not a key that says yes.
+        control_for_test(
+            &gate,
+            "ops",
+            "default",
+            ControlOp::Grant {
+                name: "alice".into(),
+                role: Role::Chat,
+                until: None,
+            },
+        )
+        .await;
+        let room = agents.store.room("ops").unwrap();
+        let link = crate::helper::testkit::connect(&gate, &agents).await;
+        crate::helper::peers::sync_from_home(&agents, &room, &link)
+            .await
+            .unwrap();
+        assert!(risks(&agents).is_empty(), "{:?}", risks(&agents));
+    }
+
+    #[tokio::test]
+    async fn check_approve_says_so_when_it_succeeds_on_such_a_machine() {
+        let dir = TempHome::new("risk6");
+        let h = helper("home", &dir, None);
+        room_with(&h, "ops", &[(&h, "worker", "worker", false)]).await;
+        let action: diavlos_core::Action = serde_json::from_value(
+            serde_json::json!({"verb": "deploy", "target": "api", "params": {}}),
+        )
+        .unwrap();
+        let q = send(
+            &h,
+            "ops",
+            "worker",
+            DraftWire {
+                text: "deploy?".into(),
+                kind: Some(MessageType::Question),
+                action: Some(action.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        send(
+            &h,
+            "ops",
+            "default",
+            DraftWire {
+                kind: Some(MessageType::Approve),
+                reply_to: Some(q.message.id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let spent = check_approve(&h, "ops", "worker", &action, None)
+            .await
+            .unwrap();
+        let risk = spent.risk.expect("the approver key is here with the agent");
+        assert_eq!(risk.agents, vec!["worker".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_agent_owned_room_is_a_risk_only_with_other_agents() {
+        // A room made by an agent-kind key: it cannot approve, but as owner
+        // it can invite a member marked human.
+        let dir = TempHome::new("risk5");
+        let h = helper("home", &dir, None);
+        new_room(&h, "ops", "", "gatekeeper", None, None)
+            .await
+            .unwrap();
+        assert!(
+            risks(&h).is_empty(),
+            "the owner key alone is not an agent next to itself"
+        );
+        h.identity("worker").await.unwrap();
+        let r = risks(&h);
+        assert_eq!(r[0].approvers, Vec::<String>::new());
+        assert_eq!(r[0].owner.as_deref(), Some("gatekeeper"));
+        assert_eq!(r[0].agents, vec!["worker".to_string()]);
+        assert!(r[0]
+            .describe()
+            .contains("the owner key `gatekeeper`, which can invite a new human member"));
     }
 }
 
