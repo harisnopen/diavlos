@@ -265,6 +265,9 @@ each other over the internet with [iroh](https://iroh.computer): a direct
 peer link when possible, a relay over HTTPS on 443 when the network won't
 allow direct. Both are encrypted end to end; the relay only sees encrypted
 bytes. See [docs/RELAY.md](https://github.com/harisnopen/diavlos/blob/main/docs/RELAY.md) to self-host one.
+To keep every link inside your own VPN (Tailscale, Headscale, NetBird,
+ZeroTier, Nebula, WireGuard), set `private_networks`; see
+[docs/PRIVATE-NETWORKS.md](https://github.com/harisnopen/diavlos/blob/main/docs/PRIVATE-NETWORKS.md).
 
 A room lives on the helper that made it (the owner's). That helper gives
 every message its place in the hash chain. Members send to it and sync
@@ -287,6 +290,7 @@ iroh can be swapped without touching the rest.
 [helper]
 public_relays = true      # false: nothing ever goes to n0's servers
 relay_urls = []           # your own iroh relays, HTTPS on 443
+private_networks = []     # ["tailscale"] or CIDRs: only talk inside your VPN
 telemetry = false         # zero telemetry. Nothing is sent anywhere.
 port = 0                  # picked once at random and kept
 log_level = "info"

@@ -28,6 +28,12 @@ pub struct HelperConfig {
     /// Your own relay servers (self-hosted iroh relay), HTTPS URLs on 443.
     #[serde(default)]
     pub relay_urls: Vec<String>,
+    /// Private network only: CIDRs ("10.147.17.0/24") or names
+    /// ("tailscale", "headscale", "netbird"). When set, the helper binds
+    /// only to its address on that network, uses no relay (public or
+    /// `relay_urls`), and refuses links from outside it. Empty: off.
+    #[serde(default)]
+    pub private_networks: Vec<String>,
     /// Telemetry. Off. Nothing is sent anywhere. Opt-in only, and there is
     /// nothing to opt into in v0.1.
     #[serde(default)]
@@ -100,6 +106,7 @@ impl Default for HelperConfig {
         HelperConfig {
             public_relays: true,
             relay_urls: Vec::new(),
+            private_networks: Vec::new(),
             telemetry: false,
             port: 0,
             log_level: default_log_level(),
@@ -132,6 +139,11 @@ const TEMPLATE: &str = r#"# Diavlos helper config. Every key is optional.
 # your own relays below.
 public_relays = true
 relay_urls = []
+# Private network only (Tailscale, Headscale, NetBird, ZeroTier, Nebula,
+# WireGuard, ...). CIDRs like "10.147.17.0/24" or the names "tailscale",
+# "headscale", "netbird". When set: no relays at all, and only addresses
+# inside these ranges, both ways. Empty is off.
+private_networks = []
 # Telemetry is off. Nothing is sent anywhere. There is nothing to opt into.
 telemetry = false
 # UDP port for peer links. Picked once at random and kept.
@@ -210,6 +222,7 @@ mod tests {
     fn template_parses_to_defaults() {
         let cfg: Config = toml::from_str(TEMPLATE).unwrap();
         assert!(cfg.helper.public_relays);
+        assert!(cfg.helper.private_networks.is_empty());
         assert!(!cfg.helper.telemetry);
         assert_eq!(cfg.limits.daily_per_room, 2000);
         assert_eq!(cfg.license.key, "");

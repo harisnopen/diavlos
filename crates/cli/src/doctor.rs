@@ -6,6 +6,7 @@ use diavlos_client::{Client, Paths};
 use serde_json::{json, Value};
 
 use crate::config::Config;
+use crate::net::private::PrivateNetworks;
 
 pub async fn run(paths: &Paths) -> Value {
     let mut checks = Vec::new();
@@ -63,10 +64,15 @@ pub async fn run(paths: &Paths) -> Value {
             "config",
             true,
             format!(
-                "{} (public_relays={}, relays={}, secret_scan={}, encrypt_inbox={}, metrics={})",
+                "{} (public_relays={}, relays={}, private_networks={}, secret_scan={}, encrypt_inbox={}, metrics={})",
                 paths.config().display(),
-                c.helper.public_relays,
+                c.helper.public_relays && c.helper.private_networks.is_empty(),
                 c.helper.relay_urls.len(),
+                if c.helper.private_networks.is_empty() {
+                    "off".to_string()
+                } else {
+                    c.helper.private_networks.join("+")
+                },
                 c.helper.secret_scan,
                 c.helper.encrypt_inbox,
                 if c.helper.metrics_addr.is_empty() {
@@ -77,6 +83,34 @@ pub async fn run(paths: &Paths) -> Value {
             ),
         ),
         Err(e) => check("config", false, format!("{e:#}")),
+    }
+    // Private network only: say so before the helper refuses to start.
+    if let Ok(c) = Config::load(&paths.config()) {
+        if !c.helper.private_networks.is_empty() {
+            match PrivateNetworks::parse(&c.helper.private_networks) {
+                Ok(p) => {
+                    let local = p.local_addrs();
+                    check(
+                        "private network",
+                        !local.is_empty(),
+                        if local.is_empty() {
+                            format!("no address in {}; is the VPN up?", p.describe())
+                        } else {
+                            format!(
+                                "{} in {}",
+                                local
+                                    .iter()
+                                    .map(|a| a.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                p.describe()
+                            )
+                        },
+                    );
+                }
+                Err(e) => check("private network", false, format!("{e:#}")),
+            }
+        }
     }
     let keys: Vec<String> = std::fs::read_dir(paths.keys_dir())
         .map(|rd| {
@@ -169,7 +203,10 @@ pub async fn run(paths: &Paths) -> Value {
                     .filter(|r| r["connected"].as_bool().unwrap_or(false))
                     .count();
                 let public = Config::load(&paths.config())
-                    .map(|c| c.helper.public_relays || !c.helper.relay_urls.is_empty())
+                    .map(|c| {
+                        c.helper.private_networks.is_empty()
+                            && (c.helper.public_relays || !c.helper.relay_urls.is_empty())
+                    })
                     .unwrap_or(true);
                 check(
                     "relays",

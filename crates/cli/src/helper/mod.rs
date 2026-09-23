@@ -32,6 +32,7 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::net::iroh::IrohTransport;
+use crate::net::private::PrivateNetworks;
 use crate::net::{Link, Transport};
 
 /// How many events `events` (without --follow) can replay.
@@ -856,6 +857,7 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         config.helper.port,
         config.helper.public_relays,
         &config.helper.relay_urls,
+        PrivateNetworks::parse(&config.helper.private_networks)?,
     )
     .await
     .context("bind network")?;

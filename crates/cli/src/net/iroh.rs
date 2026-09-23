@@ -10,12 +10,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use diavlos_core::{Error, Result};
+use iroh::endpoint::IncomingAddr;
 use iroh::endpoint::{presets, Connection, SendStream};
-use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher};
+use iroh::protocol::{AcceptError, IncomingFilterOutcome, ProtocolHandler, Router};
+use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
+};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 
+use super::private::PrivateNetworks;
 use super::{read_frame, write_frame, Link, Reply, Transport, Wire, ALPN};
 
 /// How long a dial may take before we say "reached nobody".
@@ -27,22 +31,31 @@ pub struct IrohTransport {
     endpoint: Endpoint,
     router: Router,
     incoming: Mutex<mpsc::Receiver<Arc<dyn Link>>>,
+    /// When on: only these ranges, both ways.
+    private: PrivateNetworks,
 }
 
 impl IrohTransport {
-    /// Bind the endpoint. `port` 0 means pick one.
+    /// Bind the endpoint. `port` 0 means pick one. With `private` on, bind
+    /// only to this machine's address on the private network, use no relay,
+    /// and refuse links from outside it.
     pub async fn bind(
         secret: SecretKey,
         port: u16,
         public_relays: bool,
         relay_urls: &[String],
+        private: PrivateNetworks,
     ) -> anyhow::Result<Self> {
+        let public_relays = public_relays && !private.is_on();
         let mut builder = if public_relays {
             Endpoint::builder(presets::N0)
         } else {
             Endpoint::builder(presets::Minimal)
         };
-        if !relay_urls.is_empty() {
+        if private.is_on() {
+            // Only direct links inside the range; no relay of any kind.
+            builder = builder.relay_mode(RelayMode::Disabled);
+        } else if !relay_urls.is_empty() {
             let mut urls = Vec::new();
             for u in relay_urls {
                 urls.push(
@@ -54,7 +67,22 @@ impl IrohTransport {
             builder = builder.relay_mode(RelayMode::Disabled);
         }
         builder = builder.secret_key(secret).proxy_from_env();
-        if port != 0 {
+        if private.is_on() {
+            let local = private.local_addrs();
+            if local.is_empty() {
+                anyhow::bail!(
+                    "private_networks is set ({}) but this machine has no address in it; \
+                     is the VPN up?",
+                    private.describe()
+                );
+            }
+            builder = builder.clear_ip_transports();
+            for ip in local {
+                builder = builder
+                    .bind_addr(SocketAddr::new(ip, port))
+                    .map_err(|e| anyhow::anyhow!("bind {ip} port {port}: {e}"))?;
+            }
+        } else if port != 0 {
             // Pin the IPv4 port so direct addresses stay stable across
             // restarts. IPv6 keeps iroh's default bind, which may fail on
             // hosts without IPv6.
@@ -64,9 +92,18 @@ impl IrohTransport {
         }
         let endpoint = builder.bind().await?;
         let (tx, rx) = mpsc::channel(64);
-        let router = Router::builder(endpoint.clone())
-            .accept(ALPN, Handler { tx })
-            .spawn();
+        let mut router = Router::builder(endpoint.clone()).accept(ALPN, Handler { tx });
+        if private.is_on() {
+            let allowed = private.clone();
+            router =
+                router.incoming_filter(Arc::new(move |incoming| match incoming.remote_addr() {
+                    IncomingAddr::Ip(a) if allowed.contains(a.ip()) => {
+                        IncomingFilterOutcome::Accept
+                    }
+                    _ => IncomingFilterOutcome::Reject,
+                }));
+        }
+        let router = router.spawn();
         // Give the endpoint a moment to learn its own addresses so the
         // first invite carries something useful.
         for _ in 0..30 {
@@ -79,6 +116,7 @@ impl IrohTransport {
             endpoint,
             router,
             incoming: Mutex::new(rx),
+            private,
         })
     }
 
@@ -129,7 +167,7 @@ impl Transport for IrohTransport {
     }
 
     fn hints(&self) -> Value {
-        serde_json::to_value(self.endpoint.addr()).unwrap_or(Value::Null)
+        serde_json::to_value(self.private_only(self.endpoint.addr())).unwrap_or(Value::Null)
     }
 
     async fn dial(&self, node: &str, hints: &Value) -> Result<Arc<dyn Link>> {
@@ -139,6 +177,14 @@ impl Transport for IrohTransport {
             Ok(a) if a.id == id => a,
             _ => EndpointAddr::new(id),
         };
+        let addr = self.private_only(addr);
+        if self.private.is_on() && addr.is_empty() {
+            return Err(Error::ReachedNobody(format!(
+                "{} has no address on the private network ({})",
+                short(node),
+                self.private.describe()
+            )));
+        }
         let conn = tokio::time::timeout(DIAL_TIMEOUT, self.endpoint.connect(addr, ALPN))
             .await
             .map_err(|_| Error::ReachedNobody(format!("no answer from {} in time", short(node))))?
@@ -175,6 +221,23 @@ impl Transport for IrohTransport {
     async fn shutdown(&self) {
         let _ = self.router.shutdown().await;
         self.endpoint.close().await;
+    }
+}
+
+impl IrohTransport {
+    /// With private networks on, keep only addresses inside them: no relay,
+    /// no public or LAN address. Off: unchanged.
+    fn private_only(&self, addr: EndpointAddr) -> EndpointAddr {
+        if !self.private.is_on() {
+            return addr;
+        }
+        let keep: Vec<TransportAddr> = addr
+            .addrs
+            .iter()
+            .filter(|t| matches!(t, TransportAddr::Ip(a) if self.private.contains(a.ip())))
+            .cloned()
+            .collect();
+        EndpointAddr::from_parts(addr.id, keep)
     }
 }
 

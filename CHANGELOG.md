@@ -10,6 +10,15 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+### Added
+
+- `private_networks` in the config: talk only inside your own private
+  network (Tailscale, Headscale, NetBird, ZeroTier, Nebula, Cloudflare
+  WARP, WireGuard). The helper binds only to its address there, uses no
+  relay, dials and accepts only addresses inside the range, and refuses to
+  start when the VPN is down. `diavlos doctor` shows the address it picked.
+  See [docs/PRIVATE-NETWORKS.md](docs/PRIVATE-NETWORKS.md).
+
 ## [2.0.0] — 2026-09-23
 
 The first release since 1.0.0. It also carries everything listed under
