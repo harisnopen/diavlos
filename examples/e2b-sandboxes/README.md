@@ -53,11 +53,25 @@ your own Diavlos home, starts two sandboxes from the template, gives each
 agent its own one-time invite, and waits for you at the approve step.
 Both sandboxes are killed at the end, and you keep a signed audit bundle.
 
-The `--local` mode was run end to end for this example. The E2B mode uses
-the same agents and the E2B Python SDK (`Sandbox.create`,
-`commands.run`, `files.write`, `Template.build`), but has not yet been run
-against a live E2B account: if something breaks there, please open an
-issue.
+It was run for real on E2B by the `e2b demo` workflow
+([run 35896619176](https://github.com/harisnopen/diavlos/actions/runs/35896619176)):
+two sandboxes on Debian 13, both on diavlos 2.0.0, one approve and one
+deny. From the log:
+
+```
+[host] sandbox-a: E2B sandbox i4jnwb3zb3adxmdfz7zl7
+[host] sandbox-b: E2B sandbox if8p2yvqhh7brn2roai48
+[runner] planner wants the job run. Asking a human first.
+[runner] approve from human
+[runner] gate: approved by human (m_01M37NP3PMD16MQK1A6JWW2Y96), valid until 2026-09-23T17:50:46Z. Spent for operation op_349afefc...
+[runner] job exit 0: 'nightly job ok on e2b.local: sha256 2f3bf7d3e4a76a85 in 47 ms'
+[host] audit bundle: OK: every signature verifies and the chain is whole.
+```
+
+On a Linux x86_64 host, `run.py` copies its own `diavlos` and Python
+binding into each sandbox, so every helper in the room runs the same
+version. Pass `--template-diavlos` to use the release the template
+installed instead.
 
 ## Why the human gate holds
 

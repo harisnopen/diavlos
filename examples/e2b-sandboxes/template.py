@@ -16,7 +16,8 @@ BINDING = "git+https://github.com/harisnopen/diavlos#subdirectory=bindings/pytho
 
 template = (
     Template()
-    .from_python_image("3.12")
+    # Debian 13: new enough (glibc 2.41) to run a diavlos built on a current Linux.
+    .from_python_image("3.12-trixie")
     .apt_install(["curl", "ca-certificates", "git"])
     # The release installer checks the sigstore bundle when cosign is present.
     .run_cmd("curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh "
