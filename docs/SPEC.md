@@ -1,6 +1,6 @@
 # The Diavlos message format
 
-Version 1. Last changed 2026-09-22.
+Version 1. Last changed 2026-09-23.
 
 This document describes the wire format completely enough to write a second
 implementation. It is published on its own, under MIT, so that the format
@@ -261,9 +261,57 @@ Before acting, an implementation checks all of:
 5. `ts` is not in the future and `expires` is not in the past.
 6. If `once` is true, this approve has not been spent before.
 
-All six, or the action does not happen. The reference implementation exposes
-this as `diavlos check-approve`, which exits `0` when every check passes and
-`6` when any of them fails.
+All six, or the action does not happen.
+
+Checks 3 and 6 depend on state that changes: who holds which role, and
+what has been spent. They are decided by the room's **home**, at the moment
+of spending, against its own current state, which is the authority. A
+member's copy of the log can be behind (it may not have heard of a revoke
+or of another member's spend), so a member never decides them alone.
+
+**Spending.** A member about to act sends the home a `spend` request (see
+section 4) naming the room, the approve, the action hash, an **operation
+id**, itself, the node it acts from, and a time, signed with its member
+key over all of those. The home checks, in one transaction:
+
+- the room is not paused or closed;
+- the spender is a current member, not revoked, muted or expired, and not
+  an observer;
+- checks 1 to 5 above, with the approver's role and standing as they are
+  now.
+
+It then records the spend and appends an audit event to the chain, both or
+neither. At most one spend is recorded per approve, ever:
+
+- no spend yet: record it, answer `spent`;
+- a spend by the same member for the same operation id: answer `spent`
+  with the recorded spend (the first answer was lost on the way);
+- a spend for any other operation: answer `already_spent`.
+
+The operation id is the caller's, and must be the same on every retry of
+one operation. The audit event is a `system` message signed by the owner
+key, with `data`:
+
+```json
+{"event": "approve_spent", "approve": "m_…", "action_hash": "sha256:…",
+ "op": "…", "spender": "…", "node": "…", "at": "2026-09-23T10:00:00Z"}
+```
+
+Members that receive it know the approve is spent. That is evidence; the
+home's record is the lock.
+
+A spend is permission for one operation. It is not proof the operation
+ran exactly once: the executor must deduplicate on the operation id and
+reconcile an outcome it is unsure of, such as a crash after the spend and
+before the change. And an action hash can describe a legitimate
+repetition, so name the specific operation in the action (a change ticket,
+a config revision, a target, a rollback reference) to make one approve mean
+one operation.
+
+The reference implementation exposes this as `diavlos check-approve`, which
+exits `0` when the home records the spend, `6` when a check fails or the
+approve is spent, and `3` when the home cannot be reached, in which case
+nothing was spent.
 
 ### 2.6 The chain
 
@@ -393,14 +441,45 @@ many bytes of a JSON object tagged with `t`.
 | `submit` / `sequenced` | member → home | Ask the home to place a signed message in the chain. |
 | `sync` / `messages` | member → home | "Give me everything after this seq." Signed. |
 | `push` / `ack` | home → member | New messages, unsolicited. |
+| `spend` / `spent`, `already_spent` | member → home | Record the spend of an approve (section 2.5). Signed over `room_id`, `approve_id`, `action_hash`, `op_id`, `spender`, `node`, `ts`. |
+| `err` | either | The request failed. See below. |
+
+An `err` frame carries `code` (the same codes as the CLI's exit codes) and
+`msg`, and from version 1.2 of the reference implementation two optional
+fields:
+
+| Field | Meaning |
+|---|---|
+| `fate` | `temporary`: keep the message and try again later (not reached, paused, over budget, the home failed to store it). `definitive`: the same signed message will never be taken (denied, invalid, not a member). |
+| `retry_after` | Seconds until trying again can work, when known (over budget). |
+
+A helper that does not send `fate` is read by `code`: `3`, `4` and `7` are
+temporary; `2`, `5` and `6` are definitive; anything else is unknown.
 
 A member that cannot reach the home queues its messages on its own disk and
-submits them when the link comes back. Nothing is lost, and nothing is
-stored twice, because `id` is unique and `seq` is assigned once. A submit
-whose answer was lost is sent again. The home answers a resubmit (same
-`id`, same `sig`) with the message it already stored and does nothing else
-a second time. The same `id` with a different `sig` or room is refused.
-Readers should still dedupe by `id`: delivery to them is at least once.
+submits them when the link comes back. A queued message leaves the queue
+only when it is in the chain, or when a person drops it on purpose:
+
+- a temporary failure keeps it and tries again later, with backoff, and
+  never gives up for age alone;
+- a definitive refusal keeps it as `failed`, for a person to retry or drop;
+- an unknown answer keeps it and tries again, and sets it aside as
+  `quarantined` only when the same answer has come back at least five times
+  over at least an hour.
+
+Each sender's messages go in the order they were queued; one sender's
+waiting message holds back only that sender's later ones.
+
+Nothing is stored twice, because `id` is unique and `seq` is assigned once.
+A submit whose answer was lost is sent again. The home answers a resubmit
+(same `id`, same `sig`) with the message it already stored and does nothing
+else a second time. The same `id` with a different `sig` or room is
+refused. Readers should still dedupe by `id`: delivery to them is at least
+once.
+
+A frame is only ever read whole. A new frame type is unknown to an older
+helper, which drops the link rather than guess; a member asking an older
+home to record a spend therefore fails closed.
 
 ## 5. Audit bundles
 
