@@ -10,6 +10,10 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-23
+
+1.0.1 was prepared but never released; its changes ship here.
+
 ### Security
 
 - `check-approve` checks the approver still has the approver role, and is
@@ -34,6 +38,24 @@ imply a change to the wire.
 - `verify` prints the owner key's fingerprint, and `verify --owner
   <fingerprint>` fails a bundle from any other owner. A bundle alone only
   proves it is whole, not whose it is.
+- Release archives now carry `LICENSE` and `THIRD-PARTY-LICENSES.txt`
+  beside the binary. MIT, Apache-2.0 and the BSD licences all allow
+  shipping a binary built from their code on the condition that the
+  copyright notice travels with the copy; a bare binary in a tar.gz
+  carried nobody's. The file is generated at release time by `cargo about`
+  from the crates that really went into the build, so it cannot go stale.
+  The Homebrew formula and the npm package install both.
+- `diavlos doctor` reports the length of the helper's socket path.
+- npm publishing runs from GitHub Actions through npm's trusted
+  publishing (OIDC). No token is stored anywhere.
+
+### Changed
+
+- A home directory too deep for a Unix socket now fails in milliseconds
+  with a message naming the limit, how far over it is, and that
+  `DIAVLOS_HOME` or `--home` is the way out. It used to wait ten seconds
+  and then report `local socket name length exceeds capacity of sun_path
+  of sockaddr_un`, which named a C struct instead of the problem.
 
 ### Fixed
 
@@ -66,29 +88,6 @@ imply a change to the wire.
   to count as approved; its outcome is now `answered`.
 - `install.sh` and the Action stop when cosign rejects the download. Before,
   a failed check still installed the binary.
-
-## [1.0.1] — 2026-09-22
-
-### Added
-
-- Release archives now carry `LICENSE` and `THIRD-PARTY-LICENSES.txt`
-  beside the binary. MIT, Apache-2.0 and the BSD licences all allow
-  shipping a binary built from their code on the condition that the
-  copyright notice travels with the copy; a bare binary in a tar.gz
-  carried nobody's. The file is generated at release time by `cargo about`
-  from the crates that really went into the build, so it cannot go stale.
-  The Homebrew formula and the npm package install both.
-- `diavlos doctor` reports the length of the helper's socket path.
-- npm publishing runs from GitHub Actions through npm's trusted
-  publishing (OIDC). No token is stored anywhere.
-
-### Changed
-
-- A home directory too deep for a Unix socket now fails in milliseconds
-  with a message naming the limit, how far over it is, and that
-  `DIAVLOS_HOME` or `--home` is the way out. It used to wait ten seconds
-  and then report `local socket name length exceeds capacity of sun_path
-  of sockaddr_un`, which named a C struct instead of the problem.
 
 ## [1.0.0] — 2026-09-21
 
@@ -130,6 +129,6 @@ bundle, plus a CycloneDX SBOM.
   services. `doctor` for support tickets, `/metrics` on localhost for
   Prometheus, zero telemetry.
 
-[Unreleased]: https://github.com/harisnopen/diavlos/compare/v1.0.1...HEAD
-[1.0.1]: https://github.com/harisnopen/diavlos/compare/v1.0.0...v1.0.1
+[Unreleased]: https://github.com/harisnopen/diavlos/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/harisnopen/diavlos/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/harisnopen/diavlos/releases/tag/v1.0.0

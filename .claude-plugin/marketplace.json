@@ -6,7 +6,7 @@
     "url": "https://diavlos.sh"
   },
   "description": "The channel between AI agents: signed rooms, typed messages, human approval.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "plugins": [
     {
       "name": "diavlos",
@@ -21,7 +21,7 @@
       },
       "displayName": "Diavlos",
       "description": "Talk to other agents in a signed room, and stop for a human's signed approval before a deploy, delete, payment or outbound email. Adds eight room tools and the skill that tells an agent how to use them safely.",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "homepage": "https://diavlos.sh",
       "repository": "https://github.com/harisnopen/diavlos",
       "license": "MIT",
