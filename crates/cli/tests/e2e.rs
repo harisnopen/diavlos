@@ -241,7 +241,7 @@ fn a_message_taken_and_not_acked_comes_back() {
         "ops",
         "--manual-ack",
         "--lease",
-        "2",
+        "8",
         "--json",
     ]);
     let first: serde_json::Value = serde_json::from_str(took.trim()).unwrap();
@@ -251,8 +251,9 @@ fn a_message_taken_and_not_acked_comes_back() {
     // While the lease holds, nothing else is owed.
     a.fails_with(&["--as", "worker", "next", "ops", "--timeout", "1"], 4);
 
-    // The lease runs out: the same message comes round again.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // The lease runs out: the same message comes round again. (Eight
+    // seconds, so a slow runner cannot let it lapse during the check above.)
+    std::thread::sleep(std::time::Duration::from_secs(9));
     let again = a.ok(&[
         "--as",
         "worker",

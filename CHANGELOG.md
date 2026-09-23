@@ -74,6 +74,9 @@ imply a change to the wire.
   agent acks. The bridges ack after the other service confirms the post.
 - Control messages (grant, pause, mute, revoke, hold) take effect in the
   same transaction as the message.
+- `diavlos-core`: `Error::OverBudget` carries the seconds until the limit
+  lets the next message through, `OverBudget(String, Option<u64>)`, and
+  `Error::fate()` says whether a failure is temporary or definitive.
 - The docs stop claiming more than the code does. "Secrets never leave the
   machine" becomes what the scan is, a guard against accidents. "Never lose
   a message" becomes "Messages wait", and a new *Known limits* section says
