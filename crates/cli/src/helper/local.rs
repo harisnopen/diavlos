@@ -8,6 +8,7 @@ use std::time::Duration;
 use diavlos_client::proto::{
     AskResult, CheckApproveResult, DraftWire, ExportResult, HelloResult, InviteResult, JoinResult,
     ReadResult, Request, Response, RoomStatus, RotateResult, SendResult, StatusResult, WhoEntry,
+    WhoamiResult,
 };
 use diavlos_client::Paths;
 use diavlos_core::{
@@ -152,6 +153,17 @@ async fn dispatch(helper: &Arc<Helper>, req: Request) -> Result<serde_json::Valu
             version: diavlos_core::VERSION.into(),
             node: helper.net.node_id(),
         })?,
+        Request::Whoami { identity } => {
+            let id = helper.identity(&identity).await?;
+            let key = id.public();
+            serde_json::to_value(WhoamiResult {
+                label: identity,
+                name: id.name.clone(),
+                kind: id.kind,
+                key: key.to_string(),
+                fingerprint: key.fingerprint(),
+            })?
+        }
         Request::Status => serde_json::to_value(status(helper).await?)?,
         Request::Stop => serde_json::json!({"stopping": true}),
         Request::Rooms => serde_json::to_value(status(helper).await?.rooms)?,

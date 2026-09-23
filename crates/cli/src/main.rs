@@ -1248,9 +1248,30 @@ fn mcp_install(
         }
     };
 
+    // One key per file: tools that share a file act as the same key. A tool
+    // with no file for this scope fails on its own; the rest still install.
     let mut failed = 0;
-    for t in targets {
-        match install::install(t, project, identity, explicit_home.as_deref(), dry_run) {
+    let mut located = Vec::new();
+    for t in &targets {
+        match install::target_path(t, project) {
+            Ok(path) => located.push((*t, path)),
+            Err(e) => {
+                eprintln!("{:<14} {e:#}", t.label);
+                failed += 1;
+            }
+        }
+    }
+    let planned = install::plan_keys(&located, identity);
+
+    let mut keys: Vec<String> = Vec::new();
+    for ((t, _), (key, shared_with)) in located.into_iter().zip(planned) {
+        if let Some(first) = shared_with {
+            println!(
+                "{:<14} shares its file with {first}, so it acts as the same key",
+                t.label
+            );
+        }
+        match install::install(t, project, &key, explicit_home.as_deref(), dry_run) {
             Ok(o) => {
                 let what = if dry_run {
                     if o.changed {
@@ -1264,6 +1285,13 @@ fn mcp_install(
                     "already set"
                 };
                 println!("{:<14} {what} {}", o.tool, o.path.display());
+                println!(
+                    "{:<14} acts as the agent key {:?}, not as you",
+                    "", o.identity
+                );
+                if !keys.contains(&o.identity) {
+                    keys.push(o.identity.clone());
+                }
                 if let Some(b) = &o.backup {
                     println!("{:<14} kept a copy of the old file at {}", "", b.display());
                 }
@@ -1283,7 +1311,16 @@ fn mcp_install(
         return Ok(1);
     }
     if !dry_run {
-        println!("\nRestart the tool and the room tools are there: diavlos_send, diavlos_next, diavlos_ask and five more.");
+        let first = keys.first().map(String::as_str).unwrap_or("<agent>");
+        println!(
+            "\nAn agent key starts in no rooms. Let it into each room it should see, as the owner:\n\n  \
+             diavlos invite <room> {first}\n  \
+             diavlos --as {first} join <invite>"
+        );
+        if keys.len() > 1 {
+            println!("\nThe same for {}.", keys[1..].join(", "));
+        }
+        println!("\nThen restart the tool: diavlos_send, diavlos_next, diavlos_ask and five more.");
     }
     Ok(0)
 }

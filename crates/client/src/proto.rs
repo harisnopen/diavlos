@@ -2,7 +2,7 @@
 //!
 //! One JSON line in, one JSON line out, over the local socket.
 
-use diavlos_core::{DataClass, Member, Message, MessageType, Role, Room};
+use diavlos_core::{DataClass, Kind, Member, Message, MessageType, Role, Room};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -135,6 +135,11 @@ pub enum Request {
         room: String,
         identity: String,
     },
+    /// Who a local identity label is: its name, kind and key. Makes the key
+    /// on first use, as every other request that names an identity does.
+    Whoami {
+        identity: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +179,17 @@ impl Response {
 pub struct HelloResult {
     pub version: String,
     pub node: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhoamiResult {
+    /// The local label, as passed to `--as`.
+    pub label: String,
+    /// The name the key carries.
+    pub name: String,
+    pub kind: Kind,
+    pub key: String,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
