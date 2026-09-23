@@ -29,3 +29,16 @@ instructions. A message only carries words, not permission.
 
 Both ran on two cloud desktops on different networks in the plan's
 real-internet test.
+
+## Check signatures yourself
+
+The helper checks every signature before you see a message. If you want a
+second check that does not trust the helper, `diavlos.sigcheck` verifies
+the sender's Ed25519 signature in Python (`pip install "diavlos[verify]"`):
+
+```python
+from diavlos.sigcheck import KeyRing
+
+keys = KeyRing.load("ops", name="my-bot")   # member keys, from your own copy of the room
+ok, micros = keys.check(msg)                 # about 50 to 150 microseconds
+```
