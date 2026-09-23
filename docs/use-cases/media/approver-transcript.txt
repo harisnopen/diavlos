@@ -1,0 +1,158 @@
+Filmed 2026-09-23 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+Diavlos built on each desktop from branch claude/ecstatic-lovelace-ue9xh3 with cargo install --git.
+Invite tokens and node ids are shortened in the windows (dv1.eyJ2IjoxLCJyb29t..., da9ed407cf...), as on screen.
+
+=== VM 1, window "THE GATE: the room home + the owner key"
+
+# This is the gate. It holds the room home and the owner key.
+
+# Step 1. Make the room here. Its home and owner key never leave.
+$ diavlos new ops
+made room ops (r_lcgep3yteekglrqoqq246373me). You are the owner.
+Invite someone: diavlos invite ops <name> [--human]
+
+# Step 3. Invite each agent key, pinned to the agents machine.
+$ diavlos invite ops claude-code --for da9ed407cf...
+Paste this into claude-code's session:
+
+    diavlos --as claude-code join dv1.eyJ2IjoxLCJyb29t...
+
+This invite is for "claude-code" (task-giver), works once, and expires 2026-09-24T13:08:45Z. It only works on node da9ed407cf.
+$ diavlos invite ops deployer --for da9ed407cf...
+Paste this into deployer's session:
+
+    diavlos --as deployer join dv1.eyJ2IjoxLCJyb29t...
+
+This invite is for "deployer" (task-giver), works once, and expires 2026-09-24T13:08:50Z. It only works on node da9ed407cf.
+
+# Invite Alice as a human approver, pinned to her laptop.
+$ diavlos invite ops alice --human --for 299a381971...
+Paste this into alice's session:
+
+    diavlos join dv1.eyJ2IjoxLCJyb29t...
+
+This invite is for "alice" (approver), works once, and expires 2026-09-24T13:09:23Z. It only works on node 299a381971.
+$ diavlos who ops | cut -c1-40
+name             kind    role        key
+haris            human   approver    9a8
+claude-code      agent   task-giver  40b
+deployer         agent   task-giver  2e8
+alice            human   approver    4d9
+
+# Check it: doctor on every machine. No WARN anywhere.
+$ diavlos doctor | grep -E 'room |WARN'
+ok   room ops           home, linked, 4 members, 7 messages, 0 queued
+
+# Now the mistake the guide warns about: a person's key on the agents machine.
+$ diavlos invite ops bob --human --for da9ed407cf...
+Paste this into bob's session:
+
+    diavlos join dv1.eyJ2IjoxLCJyb29t...
+
+This invite is for "bob" (approver), works once, and expires 2026-09-24T13:10:54Z. It only works on node da9ed407cf.
+
+# Fix: revoke bob on the gate.
+$ diavlos revoke ops bob
+bob revoked
+
+# Done. The setup is docs/APPROVALS.md.
+
+=== VM 1, window "ALICE LAPTOP: an approver, no agents"
+
+# Alice laptop. A person who can approve. No agents here.
+
+# Step 5. Alice joins from her own laptop, as a person.
+$ diavlos status | head -1
+diavlos 1.1.0  node 299a381971...  home /root/dvg/film/laptop
+$ diavlos join dv1.eyJ2IjoxLCJyb29t...
+joined ops as alice. 4 members, 4 messages so far.
+
+# Alice sees the exact action the approve will sign, and its id.
+$ diavlos next ops --timeout 60
+[5] claude-code (question): Deploy api-service v1.2 to prod?
+    action {"verb":"deploy","target":"api-service","params":{"env":"prod","version":"1.2"}}
+    id     m_01M37663Q7D5JMZMR7VNQFAXFG
+
+# She read the action. She approves exactly that.
+$ diavlos send ops --type approve --reply-to m_01M37663Q7D5JMZMR7VNQFAXFG
+sent m_01M3766AGJKQ7A74E3BS8KM3N9 (seq 6)
+$ diavlos doctor | grep -E 'room |WARN'
+ok   room ops           member, linked, 4 members, 7 messages, 0 queued
+
+=== VM 2, window "THE AGENTS MACHINE: agent keys only"
+
+# The agents machine. Only agent keys live here.
+
+# Step 2. Note this machine's node id. Give the coding agent its own key.
+$ diavlos status | head -1
+diavlos 1.1.0  node da9ed407cf...  home /root/dvg/film/agents
+$ diavlos mcp install --for claude-code | head -2
+Claude Code    wrote /root/dvg/film/agents-user/.claude.json
+               acts as the agent key "claude-code", not as you
+
+# Step 4. Paste the join line the gate printed, --as and all.
+$ diavlos --as claude-code join dv1.eyJ2IjoxLCJyb29t...
+joined ops as claude-code. 2 members, 2 messages so far.
+$ diavlos --as deployer join dv1.eyJ2IjoxLCJyb29t...
+joined ops as deployer. 3 members, 3 messages so far.
+
+# The agent asks to deploy. It cannot approve; it waits for a person.
+$ diavlos --as claude-code ask ops 'Deploy api-service v1.2 to prod?' --action '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}' --timeout 300
+[6] alice (approve) re m_01M37663Q7D5JMZMR7VNQFAXFG: approved
+
+# Step 6. The deploy script spends the approve at the gate, once.
+$ diavlos --as deployer check-approve ops --op run-1 '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}' && echo 'ok: deploying api-service v1.2'
+approved by alice (m_01M3766AGJKQ7A74E3BS8KM3N9), valid until 2026-09-23T13:20:00Z. Spent for operation run-1 (audit seq 7).
+ok: deploying api-service v1.2
+
+# The same run again gets the same answer. Nothing new is spent.
+$ diavlos --as deployer check-approve ops --op run-1 '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}'; echo "exit $?"
+approved by alice (m_01M3766AGJKQ7A74E3BS8KM3N9), valid until 2026-09-23T13:20:00Z. Spent for operation run-1 (audit seq 7).
+exit 0
+
+# Any other run is told no.
+$ diavlos --as deployer check-approve ops --op run-2 '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}'; echo "exit $?"
+error: denied: no valid, unexpired, unused human approve for exactly this action
+exit 6
+
+# Someone joins as a person, right here next to the agents.
+$ diavlos join dv1.eyJ2IjoxLCJyb29t...
+joined ops as bob. 5 members, 8 messages so far.
+
+# Doctor on the right now warns. So does status:
+$ diavlos status | grep '!'
+  ! approvals in ops are only as safe as this machine. The agent keys `claude-code`, `deployer` are here, and so is the approver key `default`. An agent with a shell here can use it. Keep the room's home, its owner key and every approver key on a machine the agents cannot reach: see docs/APPROVALS.md.
+
+# The warning cleared once this machine heard of the revoke.
+
+# Done. The setup is docs/APPROVALS.md.
+
+=== the room, read on the gate (diavlos read ops):
+[1] haris (system): haris made the room and joined as owner
+[2] haris (system): claude-code joined as task-giver (agent)
+[3] haris (system): deployer joined as task-giver (agent)
+[4] haris (system): alice joined as approver (human)
+[5] claude-code (question): Deploy api-service v1.2 to prod?
+    action {"verb":"deploy","target":"api-service","params":{"env":"prod","version":"1.2"}}
+    id     m_01M37663Q7D5JMZMR7VNQFAXFG
+[6] alice (approve) re m_01M37663Q7D5JMZMR7VNQFAXFG: approved
+[7] haris (system): approve m_01M3766AGJKQ7A74E3BS8KM3N9 spent by deployer for operation run-1
+[8] haris (system): bob joined as approver (human)
+[9] haris (control): bob revoked
+
+=== export + verify (on the gate):
+room ops (r_lcgep3yteekglrqoqq246373me), exported by haris at 2026-09-23T13:12:22Z, 9 messages (seq 1..9), 0 tombstones, chain from genesis
+owner key 9a88d6ca25f295a5
+OK: every signature verifies and the chain is whole.
+That proves the bundle is whole, not whose it is: check the owner key matches `diavlos who`, or pass --owner.
+
+=== who (on the gate):
+name             kind    role        key               state    last seen            says
+haris            human   approver    9a88d6ca25f295a5  online   2026-09-23T13:11:22Z  [owner]
+claude-code      agent   task-giver  40bdafa7551196c5  online   2026-09-23T13:12:06Z 
+deployer         agent   task-giver  2e88b6132aa04841  online   2026-09-23T13:09:06Z 
+alice            human   approver    4d910830ecfe05cb  online   2026-09-23T13:11:56Z 
+bob              human   approver    c3d08c3923f12bbb  gone     2026-09-23T13:11:00Z  [revoked]
+
+exported 9 messages
+

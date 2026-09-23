@@ -17,6 +17,10 @@ For approvals that must hold against your agents, none of those keys can be
 on the machine where the agents run. The room's home holds the owner key,
 so the home is not there either.
 
+[Watch it run](use-cases/approver-off-the-agents-machine.md) on two real
+machines, every step below, including the warning when a person's key is
+put next to the agents.
+
 ## The layout
 
 | Machine | Holds | Runs |

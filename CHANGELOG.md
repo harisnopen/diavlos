@@ -104,7 +104,9 @@ imply a change to the wire.
   `status` lists it, and `check-approve` prints it when it passes. The
   status result has `approval_risks`, the check-approve result `risk`.
 - [docs/APPROVALS.md](docs/APPROVALS.md): how to keep the room's home, its
-  owner key and the approver keys on a machine the agents cannot reach.
+  owner key and the approver keys on a machine the agents cannot reach,
+  with [a filmed run](docs/use-cases/approver-off-the-agents-machine.md) of
+  every step on two cloud desktops.
 - `next` and `read` show a question's action and id under its text, so a
   person approving from the command line sees what the approve signs and
   what to pass to `--reply-to`.

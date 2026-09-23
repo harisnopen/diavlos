@@ -383,6 +383,7 @@ privileges the agent cannot touch. That includes the room owner's key, which
 can invite a new human. [docs/APPROVALS.md](docs/APPROVALS.md) sets this up step by step,
 and `diavlos doctor` warns when such a key sits on the same machine as agent
 keys.
+[Watch it run](docs/use-cases/approver-off-the-agents-machine.md) on two real machines.
 
 See [SECURITY.md](SECURITY.md) and [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 

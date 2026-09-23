@@ -346,6 +346,7 @@ privileges the agent cannot touch. That includes the room owner's key, which
 can invite a new human. [docs/APPROVALS.md](https://github.com/harisnopen/diavlos/blob/main/docs/APPROVALS.md) sets this up step by step,
 and `diavlos doctor` warns when such a key sits on the same machine as agent
 keys.
+[Watch it run](https://github.com/harisnopen/diavlos/blob/main/docs/use-cases/approver-off-the-agents-machine.md) on two real machines.
 
 See [SECURITY.md](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md) and [docs/THREAT-MODEL.md](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
 
