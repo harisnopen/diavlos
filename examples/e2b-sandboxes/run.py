@@ -35,15 +35,17 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENTS = os.path.join(HERE, "agents")
 BIN = os.environ.get("DIAVLOS_BIN") or shutil.which("diavlos") or "diavlos"
+AGENT_NAMES = ("planner", "runner")
 
 
 def log(*a):
     print(time.strftime("%H:%M:%S"), "[host]", *a, flush=True)
 
 
-def cli(home, *args):
+def cli(home, *args, env=None):
     cmd = [BIN] + (["--home", home] if home else []) + list(args)
-    return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    return subprocess.run(cmd, capture_output=True, text=True, check=True,
+                          env=env).stdout
 
 
 def invite(home, room, name):
@@ -163,7 +165,12 @@ def main():
     boxes = []
     rc = 1
     try:
-        cli(host, "new", room, "--about", "two E2B sandboxes, one human gate")
+        # The owner is named after $USER. On a GitHub runner that is "runner",
+        # which would clash with the agent of the same name.
+        owner_env = dict(os.environ)
+        if owner_env.get("USER") in AGENT_NAMES or owner_env.get("USERNAME") in AGENT_NAMES:
+            owner_env["USER"] = owner_env["USERNAME"] = "human"
+        cli(host, "new", room, "--about", "two E2B sandboxes, one human gate", env=owner_env)
         log(f"made room {room}; you are the owner and the approver")
         make = (lambda n: LocalBox(base, n)) if args.local else (lambda n: E2BBox(args.template, n))
         a, b = make("sandbox-a"), make("sandbox-b")
