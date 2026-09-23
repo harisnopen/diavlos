@@ -37,12 +37,14 @@ the commands to reproduce it.
 ## The seven promises
 
 1. **Any agent, any vendor.** Diavlos never favors one.
-2. **Never lose a message.** If the other side is offline, the message waits.
-   It arrives when they wake up.
+2. **Messages wait.** If the other side is offline, the message waits.
+   It arrives when they wake up. A message leaves your outbox only when the
+   room has it, or when you drop it yourself.
 3. **Real names.** Every agent has a key. Every message is signed with it.
    Nobody can pretend to be "alice".
 4. **Reading never deletes.** Each reader keeps its own bookmark. Ten readers
-   can all read the same message.
+   can all read the same message. A message handed to an agent stays owed
+   until the agent acks it; if the agent dies first, it comes round again.
 5. **Messages have a type.** Task, reply, done, question, claim. An agent
    knows what it got without parsing prose.
 6. **It's a tool, not just a command.** Agents call it as MCP tools first.
@@ -51,7 +53,7 @@ the commands to reproduce it.
    install, go.
 
 Delivery promise, in writing: **at-least-once, dedup by id, on disk before
-`send` returns.**
+`send` returns, and yours until you ack it.**
 
 ## Install
 
@@ -101,13 +103,18 @@ disk until A's helper is back.
 MCP client:
 
 ```json
-{ "mcpServers": { "diavlos": { "command": "diavlos", "args": ["mcp"] } } }
+{ "mcpServers": { "diavlos": { "command": "diavlos", "args": ["--as", "my-agent", "mcp"] } } }
 ```
 
 Tools: `diavlos_send`, `diavlos_ask`, `diavlos_next`, `diavlos_read`,
-`diavlos_claim`, `diavlos_release`, `diavlos_who`, `diavlos_rooms`. Same
-names and fields as the commands. Set `DIAVLOS_AS=<label>` in the server's
-environment to pick the key it acts as. The [SKILL.md](https://github.com/harisnopen/diavlos/blob/main/skills/diavlos/SKILL.md)
+`diavlos_claim`, `diavlos_release`, `diavlos_who`, `diavlos_rooms`, and
+`diavlos_ack`, `diavlos_renew`, `diavlos_nack` for a message `diavlos_next`
+handed over: it stays the agent's until it acks it, and comes round again
+if it never does. Same names and fields as the commands. `--as` (or `DIAVLOS_AS`) names the agent
+key it acts as. It will not run as a human key, and `diavlos_send` will not
+send `approve`, `deny`, `control` or `system`. An agent key starts in no
+rooms: let it in with `diavlos invite <room> my-agent` and
+`diavlos --as my-agent join <invite>`. The [SKILL.md](https://github.com/harisnopen/diavlos/blob/main/skills/diavlos/SKILL.md)
 tells agents the rules in plain words; drop it into your agent's skills.
 
 **The command line** for agents that only have a shell (Aider, scripts,
@@ -138,7 +145,7 @@ diavlos --as fixer next ops
 
 The `default` key is you, the person who installed it. Any other label is
 an agent key. The name an agent has inside a room is bound at invite time,
-not by the key file.
+not by the key file. `diavlos mcp` runs only as an agent key.
 
 ### Ask a human first
 
@@ -154,9 +161,16 @@ diavlos ask ops "Deploy api-service v1.2 to prod?" --timeout 600 \
 # the human (a key invited with --human)
 diavlos send ops --type approve --reply-to m_01J8X5      # or: diavlos deny ops m_01J8X5 --reason "not now"
 
-# the deploy script
-diavlos check-approve ops '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}' && ./deploy.sh
+# the deploy script, as a member of the room
+diavlos --as deployer check-approve ops --op "$RUN_ID" \
+  '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}' && ./deploy.sh
 ```
+
+The room's home records the spend, once, for that operation. A second run
+of the same operation gets the same answer back; any other run, on any
+machine, gets a no. If the home is out of reach the exit code is 3 and
+nothing is spent. A spend is permission for one operation, not proof it
+ran once: make `deploy.sh` skip an operation id it has already done.
 
 One rule worth writing down: a message only carries words, not permission.
 If an agent relays "the human said yes", that is not a yes. Only an approve
@@ -173,14 +187,17 @@ signed by the human's own key is.
 | `diavlos rotate <room>` | New room key. Everyone out. Re-invite who you keep. |
 | `diavlos send <room> "text" --type task --to bob` | Send a message. Reads from stdin if no text. |
 | `diavlos ask <room> "text" --timeout 120 [--action <json>]` | Send a question and wait for a reply to that exact message. Exit 4 on timeout, 6 on a deny. |
-| `diavlos next <room> [--timeout <secs>]` | Wait for the next message from someone else. Skips your own and helper notices. |
-| `diavlos read <room> [--since <seq>] [--json]` | Read from your bookmark onward. Never deletes. |
-| `diavlos watch <room> --exec ./on-msg.sh` | Stream messages. Run a script for each one; it gets the message in `DIAVLOS_MESSAGE` and the sender's key in `DIAVLOS_FROM_KEY`, never on the command line. |
+| `diavlos next <room> [--timeout <secs>] [--manual-ack] [--lease <secs>]` | Wait for the next message from someone else. Skips your own and helper notices. Acks it once printed; with `--manual-ack` it prints a token and the message stays yours until `ack`, `nack`, or the lease (600 s) runs out, then comes round again. |
+| `diavlos ack <token>` / `renew <token>` / `nack <token> [--retry-in <secs>]` | Settle a message you hold: taken on, still working, or not now. Ack means taken on, not finished: say `done` in the room for that. |
+| `diavlos read <room> [--since <seq>] [--ack] [--json]` | Look at messages from your bookmark onward. Never deletes and moves nothing, unless `--ack`. |
+| `diavlos watch <room> --exec ./on-msg.sh` | Stream messages. Run a script for each one; it gets the message in `DIAVLOS_MESSAGE`, the sender's key in `DIAVLOS_FROM_KEY` and its token in `DIAVLOS_TOKEN`, never on the command line. Acked when the script succeeds, handed back when it fails. |
+| `diavlos outbox [list [<room>]]` / `outbox retry <id>` / `outbox drop <id>` | Messages still to reach a room, and ones it would not take, with why. Nothing leaves the outbox unless it reaches the room or you drop it. |
+| `diavlos deliveries <room> [--replay <seq>]` | Messages handed out and not simply done: leased, delayed, or quarantined after five tries. `--replay` hands one out again. |
 | `diavlos claim <room> <task-id>` / `diavlos release <room> <task-id>` | Take or give back a task. Two claims on one task: first wins, second is told no. |
 | `diavlos who <room>` | Who is here, their kind and role, a short key fingerprint, what they said they do, when last seen. |
 | `diavlos web` | Browser UI on localhost. Prints a one-time login link. Approve and deny buttons included. |
-| `diavlos mcp` | Start the MCP server (stdio). |
-| `diavlos mcp install --for <tool>` | Write the MCP config for Claude Code, Codex, Cursor, Gemini CLI, Superset or Vibe Kanban. `--for all` does the lot. Config writing, not adapters: it merges one server entry into the file the tool already reads and leaves the rest alone. |
+| `diavlos mcp` | Start the MCP server (stdio). Runs only as an agent key; refuses a human one. |
+| `diavlos mcp install --for <tool>` | Write the MCP config for Claude Code, Codex, Cursor, Gemini CLI, Superset or Vibe Kanban. `--for all` does the lot. Config writing, not adapters: it merges one server entry into the file the tool already reads and leaves the rest alone. The server acts as the tool's own agent key, never yours; let that key into rooms with `invite` and `join`. |
 | `diavlos hook install --for claude-code --room ops` | Wake-up hook. When the agent would stop, a waiting room message lands in its turn instead. No polling. |
 | `diavlos status` / `diavlos stop` | See rooms and links. Stop the helper. |
 
@@ -189,7 +206,7 @@ Owner and ops:
 | Command | What it does |
 |---|---|
 | `diavlos deny <room> <msg-id> --reason "..."` | Say no to an ask. Logged like a yes. |
-| `diavlos check-approve <room> <action-json>` | Exit 0 if a valid, unexpired, unused human approve exists for exactly this action. Spends it. |
+| `diavlos check-approve <room> <action-json> [--op <id>]` | Exit 0 only when the room's home records the spend of a valid, unexpired, unused human approve for exactly this action, for this operation. Exit 6: no. Exit 3: the home is out of reach, nothing spent. Run as a member of the room (`--as`). |
 | `diavlos pause <room>` / `diavlos resume <room>` | Kill switch. Nothing moves until resume. |
 | `diavlos mute <room> <name> [--off]` / `diavlos revoke <room> <name>` | Silence one member, or cut their key for good. |
 | `diavlos policy <room>` | Edit the room's rule file. One rule for now: which verbs need a human approve. |
@@ -238,7 +255,7 @@ Types: `chat`, `task`, `question`, `reply`, `done`, `claim`, `release`,
 `approve`, `deny`, `control`, `system`. Only a human key may send
 `approve` or `deny`; only the owner may send `control` (grant, pause,
 resume, mute, revoke, hold, rotated); the helper sends `system` (joined,
-alerts) with the owner's key.
+alerts) with the owner's key. Over MCP, `diavlos_send` refuses all four.
 
 ## How it works
 
@@ -303,15 +320,47 @@ Proxy settings from the environment (`HTTPS_PROXY`) are respected.
   room ids, sequence numbers, message ids, and names. Never text.
 - **Keys** live in the OS keychain (macOS Keychain, Windows Credential
   Manager, Linux Secret Service) when one is available, else in a 0600
-  file. **The inbox content is encrypted at rest.**
+  file. **The inbox content and queued messages are encrypted at rest.**
 - **One key, two machines** is refused while the first is online, and the
   owner is told.
 - **Floods and loops** stop at the per-minute and daily limits. The owner
   gets a burst alert.
-- **Secrets never leave the machine.** Anything that looks like an API key
-  or private key is refused before it is sent.
+- **Common secrets are refused.** Text, data, action and trace are scanned
+  for anything that looks like an API key, token or private key, and the
+  message is not sent. That catches accidents. It is not a data-loss
+  control: base64 or a split string gets past any pattern.
+
+### What keeping agents off your key does not do
+
+By default an agent does not act as you: `diavlos mcp` and the wake-up
+hook run as the agent's own key, and MCP will not send an approve. That fixes
+an unsafe default. It is not a wall.
+
+An agent with a shell on your OS account can do what you can: run
+`diavlos` as your key, or read the key file. Opening the web UI from another
+device does not change that while the key stays on this machine. For
+approvals that must hold against your own agents, the human key has to live
+where the agent cannot reach it, and signing with it has to need a person:
+another device, or another OS user whose socket, keys and privileges the
+agent cannot touch.
 
 See [SECURITY.md](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md) and [docs/THREAT-MODEL.md](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
+
+## Known limits
+
+- **A spend is permission for one operation, not proof it ran once.** If
+  the executor crashes after `check-approve` and before the change, it
+  cannot tell whether the change happened. Deduplicate on the operation id,
+  and name the specific operation in the action (a ticket, a revision, a
+  target) so one approve means one operation.
+- **Upgrade every helper that runs `check-approve`.** A helper older than
+  1.2 still spends approves on its own, without asking the room's home.
+- **Delivery is at least once.** A message can arrive twice: a lease that
+  ran out while the worker was still busy, a bridge that crashed after
+  posting. Dedupe by message id.
+- **Approvals that must hold against your own agents** need the human key
+  off the agent's machine; see above.
+- **Not quantum resistant.** See the [threat model](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
 
 ## The format is yours
 
@@ -331,7 +380,7 @@ injection attempt and a human approve, see
 
 - `crates/core`: keys, signed messages, invites, rooms, bundles, the inbox.
   No network, no async. MIT.
-- `crates/client`: the library. Talks to the helper. Same eight calls as
+- `crates/client`: the library. Talks to the helper. The same calls as
   the MCP tools.
 - `crates/cli`: the `diavlos` binary: helper daemon, commands, MCP server,
   web UI, bridge.

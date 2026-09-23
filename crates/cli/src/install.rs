@@ -30,6 +30,10 @@ pub struct Tool {
     pub id: &'static str,
     /// What we call it in output.
     pub label: &'static str,
+    /// The agent key it acts as unless `--as` says otherwise. Its own id,
+    /// except for a tool that writes another tool's file: the program that
+    /// reads the file is the one acting.
+    key: &'static str,
     format: Format,
     /// `true` when the tool wants a `"type": "stdio"` field.
     typed: bool,
@@ -48,6 +52,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         id: "claude-code",
         label: "Claude Code",
+        key: "claude-code",
         format: Format::Json,
         typed: true,
         user_path: &[".claude.json"],
@@ -57,6 +62,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         id: "codex",
         label: "Codex",
+        key: "codex",
         format: Format::Toml,
         typed: false,
         user_path: &[".codex", "config.toml"],
@@ -66,6 +72,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         id: "cursor",
         label: "Cursor",
+        key: "cursor",
         format: Format::Json,
         typed: true,
         user_path: &[".cursor", "mcp.json"],
@@ -75,6 +82,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         id: "gemini-cli",
         label: "Gemini CLI",
+        key: "gemini-cli",
         format: Format::Json,
         typed: false,
         user_path: &[".gemini", "settings.json"],
@@ -84,6 +92,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         id: "superset",
         label: "Superset",
+        key: "superset",
         format: Format::Json,
         typed: true,
         // Superset has no MCP config of its own. Its built-in chat reads the
@@ -95,6 +104,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         id: "vibe-kanban",
         label: "Vibe Kanban",
+        key: "claude-code",
         format: Format::Json,
         typed: true,
         user_path: &[".claude.json"],
@@ -115,6 +125,8 @@ pub fn tool_ids() -> String {
 /// What one install did.
 pub struct Outcome {
     pub tool: &'static str,
+    /// The key the tool's MCP server will act as.
+    pub identity: String,
     pub path: PathBuf,
     pub changed: bool,
     pub backup: Option<PathBuf>,
@@ -136,14 +148,51 @@ pub fn binary() -> String {
     "diavlos".into()
 }
 
-/// The args the tool should run: `mcp`, with `--as` in front when the user
-/// is not on the default key.
-fn args(identity: &str) -> Vec<String> {
+/// The key a tool's MCP server acts as. Never `default`, which is the
+/// person who installed Diavlos: an agent holding it could sign approvals
+/// as them. Unless `--as` names another key, each tool gets its own, named
+/// after it, so what Claude Code says is not mistaken for what Codex says.
+/// Every session of one tool shares that tool's key.
+pub fn agent_label<'a>(t: &'a Tool, identity: &'a str) -> &'a str {
     if identity.is_empty() || identity == "default" {
-        vec!["mcp".into()]
+        t.key
     } else {
-        vec!["--as".into(), identity.into(), "mcp".into()]
+        identity
     }
+}
+
+/// Where this tool's entry would be written. Two tools can share a file:
+/// Claude Code and Superset both read a project's `.mcp.json`.
+pub fn target_path(t: &Tool, project: bool) -> Result<PathBuf> {
+    path_for(t, project)
+}
+
+/// One key per file within one install. A file has one `diavlos` entry, so
+/// two tools that share it must act as the same key; the first one listed
+/// decides. Returns each target's key, and for a shared file the tool it
+/// shares with.
+pub fn plan_keys<'a>(
+    targets: &[(&'a Tool, PathBuf)],
+    identity: &str,
+) -> Vec<(String, Option<&'a str>)> {
+    let mut seen: Vec<(&PathBuf, String, &'a str)> = Vec::new();
+    let mut out = Vec::new();
+    for (t, path) in targets {
+        if let Some((_, key, first)) = seen.iter().find(|(p, _, _)| *p == path) {
+            out.push((key.clone(), Some(*first)));
+        } else {
+            let key = agent_label(t, identity).to_string();
+            seen.push((path, key.clone(), t.label));
+            out.push((key, None));
+        }
+    }
+    out
+}
+
+/// The args the tool should run. `--as` is always there, so the entry
+/// never falls back to the default key.
+fn args(identity: &str) -> Vec<String> {
+    vec!["--as".into(), identity.into(), "mcp".into()]
 }
 
 /// `DIAVLOS_HOME`, but only when the user has actually set one. We do not
@@ -162,7 +211,7 @@ fn json_entry(t: &Tool, identity: &str, home: Option<&Path>) -> Value {
         entry.insert("type".into(), json!("stdio"));
     }
     entry.insert("command".into(), json!(binary()));
-    entry.insert("args".into(), json!(args(identity)));
+    entry.insert("args".into(), json!(args(agent_label(t, identity))));
     let env = env_pairs(home);
     if !env.is_empty() {
         let map: Map<String, Value> = env.into_iter().map(|(k, v)| (k, json!(v))).collect();
@@ -240,11 +289,12 @@ pub fn install(
     let path = path_for(t, project)?;
     let (text, changed) = match t.format {
         Format::Json => render_json(t, &path, identity, home)?,
-        Format::Toml => render_toml(&path, identity, home)?,
+        Format::Toml => render_toml(t, &path, identity, home)?,
     };
     if dry_run || !changed {
         return Ok(Outcome {
             tool: t.label,
+            identity: agent_label(t, identity).to_string(),
             path,
             changed,
             backup: None,
@@ -254,6 +304,7 @@ pub fn install(
     write_atomic(&path, &text)?;
     Ok(Outcome {
         tool: t.label,
+        identity: agent_label(t, identity).to_string(),
         path,
         changed,
         backup,
@@ -304,7 +355,12 @@ fn render_json(
 }
 
 /// Same for Codex's TOML. `toml_edit` keeps the user's comments and layout.
-fn render_toml(path: &Path, identity: &str, home: Option<&Path>) -> Result<(String, bool)> {
+fn render_toml(
+    t: &Tool,
+    path: &Path,
+    identity: &str,
+    home: Option<&Path>,
+) -> Result<(String, bool)> {
     use toml_edit::{Array, DocumentMut, Item, Table, Value as TVal};
 
     let mut doc: DocumentMut = if path.exists() {
@@ -335,7 +391,7 @@ fn render_toml(path: &Path, identity: &str, home: Option<&Path>) -> Result<(Stri
     let mut entry = Table::new();
     entry["command"] = toml_edit::value(binary());
     let mut arr = Array::new();
-    for a in args(identity) {
+    for a in args(agent_label(t, identity)) {
         arr.push(a);
     }
     entry["args"] = Item::Value(TVal::Array(arr));
@@ -389,7 +445,10 @@ mod tests {
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
         // Ours is there, with the fields Claude Code writes.
         assert_eq!(v["mcpServers"]["diavlos"]["type"], "stdio");
-        assert_eq!(v["mcpServers"]["diavlos"]["args"][0], "mcp");
+        assert_eq!(
+            v["mcpServers"]["diavlos"]["args"],
+            json!(["--as", "claude-code", "mcp"])
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -411,7 +470,7 @@ mod tests {
         let t = tool("gemini-cli").unwrap();
         let e = json_entry(t, "default", None);
         assert!(e.get("type").is_none());
-        assert_eq!(e["args"][0], "mcp");
+        assert_eq!(e["args"], json!(["--as", "gemini-cli", "mcp"]));
     }
 
     #[test]
@@ -433,7 +492,7 @@ mod tests {
             "# my notes\nmodel = \"o3\"\n\n[mcp_servers.other]\ncommand = \"x\"\n",
         )
         .unwrap();
-        let (text, changed) = render_toml(&path, "default", None).unwrap();
+        let (text, changed) = render_toml(tool("codex").unwrap(), &path, "default", None).unwrap();
         assert!(changed);
         assert!(text.contains("# my notes"), "comment must survive");
         assert!(text.contains("model = \"o3\""));
@@ -441,8 +500,10 @@ mod tests {
         assert!(text.contains("[mcp_servers.diavlos]"));
         let parsed: toml::Value = toml::from_str(&text).unwrap();
         assert_eq!(
-            parsed["mcp_servers"]["diavlos"]["args"][0].as_str(),
-            Some("mcp")
+            parsed["mcp_servers"]["diavlos"]["args"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()),
+            Some(vec!["--as", "codex", "mcp"])
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -451,9 +512,9 @@ mod tests {
     fn toml_install_is_idempotent() {
         let dir = tmp("toml2");
         let path = dir.join("config.toml");
-        let (text, _) = render_toml(&path, "default", None).unwrap();
+        let (text, _) = render_toml(tool("codex").unwrap(), &path, "default", None).unwrap();
         std::fs::write(&path, &text).unwrap();
-        let (_, changed) = render_toml(&path, "default", None).unwrap();
+        let (_, changed) = render_toml(tool("codex").unwrap(), &path, "default", None).unwrap();
         assert!(!changed);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -478,5 +539,84 @@ mod tests {
         }
         assert!(tool("nope").is_none());
         assert!(tool_ids().contains("claude-code"));
+    }
+
+    /// The fix for an agent signing approvals with the installer's key: no
+    /// tool's entry may run as `default`, whether `--as` was left out, left
+    /// empty or given as `default`.
+    #[test]
+    fn no_tool_ever_runs_as_the_default_key() {
+        for t in TOOLS {
+            for given in ["default", ""] {
+                let e = json_entry(t, given, None);
+                assert_eq!(
+                    e["args"],
+                    json!(["--as", t.key, "mcp"]),
+                    "{} with --as {given:?}",
+                    t.id
+                );
+                assert_eq!(agent_label(t, given), t.key);
+            }
+            // The key must be one the helper accepts as a key name.
+            assert_ne!(t.key, "default");
+            diavlos_core::names::validate_name(t.key)
+                .unwrap_or_else(|e| panic!("{} is not a valid key label: {e}", t.key));
+        }
+    }
+
+    #[test]
+    fn codex_toml_names_its_own_key() {
+        let dir = tmp("toml-key");
+        let path = dir.join("config.toml");
+        let (text, _) = render_toml(tool("codex").unwrap(), &path, "default", None).unwrap();
+        assert!(
+            text.contains(r#"args = ["--as", "codex", "mcp"]"#),
+            "got:\n{text}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tools_sharing_a_file_share_one_key() {
+        let cc = tool("claude-code").unwrap();
+        let ss = tool("superset").unwrap();
+        let cx = tool("codex").unwrap();
+        let shared = PathBuf::from("/p/.mcp.json");
+        let plan = plan_keys(
+            &[
+                (cc, shared.clone()),
+                (cx, PathBuf::from("/p/.codex/config.toml")),
+                (ss, shared),
+            ],
+            "default",
+        );
+        assert_eq!(plan[0], ("claude-code".to_string(), None));
+        assert_eq!(plan[1], ("codex".to_string(), None));
+        assert_eq!(plan[2], ("claude-code".to_string(), Some("Claude Code")));
+        // An explicit key is used for all of them.
+        let plan = plan_keys(
+            &[(cc, PathBuf::from("/a")), (cx, PathBuf::from("/b"))],
+            "ops-bot",
+        );
+        assert!(plan.iter().all(|(k, _)| k == "ops-bot"));
+    }
+
+    #[test]
+    fn vibe_kanban_acts_as_the_agent_that_reads_its_file() {
+        // It writes Claude Code's file; Claude Code is what runs.
+        assert_eq!(
+            agent_label(tool("vibe-kanban").unwrap(), "default"),
+            "claude-code"
+        );
+    }
+
+    #[test]
+    fn an_explicit_agent_key_is_kept() {
+        let t = tool("cursor").unwrap();
+        assert_eq!(agent_label(t, "reviewer"), "reviewer");
+        assert_eq!(
+            json_entry(t, "reviewer", None)["args"],
+            json!(["--as", "reviewer", "mcp"])
+        );
     }
 }

@@ -1,5 +1,10 @@
-//! Outbound secret scan: refuse to send anything that looks like an API
-//! key or a private key. A hijacked agent can't paste `.env` into the room.
+//! Outbound secret scan: refuse to send anything that looks like a common
+//! API key, token or private key.
+//!
+//! This catches accidents: an agent pasting `.env` into a room, a key left
+//! in an action's params. It is not a data-loss control. A regex cannot
+//! stop an agent that means to get a secret out: base64, a split string or
+//! a format not listed here goes straight past it.
 
 use std::sync::OnceLock;
 
@@ -30,7 +35,8 @@ fn patterns() -> &'static [Pattern] {
             mk("Diavlos key", r"ed25519:[0-9a-f]{64}\b(?:[^\S]|$)*\bsecret"),
             mk(
                 "assignment that looks like a secret",
-                r#"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\b\s*[:=]\s*['"]?[A-Za-z0-9_\-/+=]{20,}"#,
+                // The optional quote after the name is for JSON: `"password":"..."`.
+                r#"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\b['"]?\s*[:=]\s*['"]?[A-Za-z0-9_\-/+=]{20,}"#,
             ),
         ]
     })
@@ -44,15 +50,30 @@ pub fn find_secret(text: &str) -> Option<&'static str> {
         .map(|p| p.name)
 }
 
-/// Scan a message's text and data together.
-pub fn scan_message(text: &str, data: &serde_json::Value) -> Option<&'static str> {
+/// Scan everything a sender writes into a message: the text, the data, the
+/// action (verb, target and params) and the trace. Missing any one of them
+/// is a way round the rest.
+pub fn scan_message(
+    text: &str,
+    data: &serde_json::Value,
+    action: Option<&crate::Action>,
+    trace: Option<&str>,
+) -> Option<&'static str> {
     if let Some(hit) = find_secret(text) {
         return Some(hit);
     }
-    if data.is_null() {
-        return None;
+    if !data.is_null() {
+        if let Some(hit) = find_secret(&data.to_string()) {
+            return Some(hit);
+        }
     }
-    find_secret(&data.to_string())
+    if let Some(action) = action {
+        let flat = serde_json::to_string(action).unwrap_or_default();
+        if let Some(hit) = find_secret(&flat) {
+            return Some(hit);
+        }
+    }
+    trace.and_then(find_secret)
 }
 
 #[cfg(test)]
@@ -103,7 +124,75 @@ mod tests {
     #[test]
     fn scans_data_too() {
         let data = serde_json::json!({"env": {"AWS": "AKIAIOSFODNN7EXAMPLE"}});
-        assert_eq!(scan_message("fine", &data), Some("AWS access key"));
-        assert_eq!(scan_message("fine", &serde_json::Value::Null), None);
+        assert_eq!(
+            scan_message("fine", &data, None, None),
+            Some("AWS access key")
+        );
+        assert_eq!(
+            scan_message("fine", &serde_json::Value::Null, None, None),
+            None
+        );
+    }
+
+    fn action(verb: &str, target: &str, params: serde_json::Value) -> crate::Action {
+        crate::Action {
+            verb: verb.into(),
+            target: target.into(),
+            params,
+        }
+    }
+
+    /// The review found params went unscanned: a key there was signed and
+    /// sent. Every part of the action counts now.
+    #[test]
+    fn scans_every_part_of_an_action() {
+        let null = serde_json::Value::Null;
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        let in_params = action("deploy", "prod", serde_json::json!({"aws_key": key}));
+        assert_eq!(
+            scan_message("fine", &null, Some(&in_params), None),
+            Some("AWS access key")
+        );
+        let in_target = action("deploy", key, serde_json::Value::Null);
+        assert_eq!(
+            scan_message("fine", &null, Some(&in_target), None),
+            Some("AWS access key")
+        );
+        let clean = action(
+            "deploy",
+            "api-service",
+            serde_json::json!({"version": "1.2"}),
+        );
+        assert_eq!(scan_message("fine", &null, Some(&clean), None), None);
+    }
+
+    #[test]
+    fn scans_the_trace() {
+        let null = serde_json::Value::Null;
+        assert!(scan_message(
+            "fine",
+            &null,
+            None,
+            Some("ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD")
+        )
+        .is_some());
+        assert_eq!(scan_message("fine", &null, None, Some("TICKET-42")), None);
+    }
+
+    /// Data and params are JSON, where a password sits as `"password":"..."`.
+    #[test]
+    fn catches_a_password_written_as_json() {
+        let null = serde_json::Value::Null;
+        let data = serde_json::json!({"password": "hunter2hunter2hunter2hunter2"});
+        assert!(scan_message("fine", &data, None, None).is_some());
+        let params = action(
+            "login",
+            "db",
+            serde_json::json!({"api_key": "abcdefghijklmnopqrstuvwxyz012345"}),
+        );
+        assert!(scan_message("fine", &null, Some(&params), None).is_some());
+        // A field that merely mentions the word is not a secret.
+        let talk = serde_json::json!({"note": "reset the password tomorrow"});
+        assert_eq!(scan_message("fine", &talk, None, None), None);
     }
 }

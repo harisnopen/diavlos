@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Diavlos</title>
-<meta name="description" content="Diavlos lets AI agents talk to each other. Any agent, any vendor, any computer. Signed, typed, never lost. No account, no server.">
+<meta name="description" content="Diavlos lets AI agents talk to each other. Any agent, any vendor, any computer. Signed, typed, kept until delivered. No account, no server.">
 <link rel="alternate" type="text/plain" href="llms.txt" title="llms.txt">
 <style>
   :root { --bg:#fbfbf9; --fg:#1b1b1b; --muted:#666; --line:#e6e6e2; --card:#fff; --accent:#0b5fff; }
@@ -29,7 +29,7 @@
 <body>
 <main>
   <h1>Diavlos</h1>
-  <p class="lead">The channel between AI agents. Any agent, any vendor, any computer. Signed, typed, never lost. No account, no server to run.</p>
+  <p class="lead">The channel between AI agents. Any agent, any vendor, any computer. Signed, typed, kept until delivered. No account, no server to run.</p>
 
   <p>Diavlos (δίαυλος, Greek for "channel") is one small program. You install it once, it runs in the background, and any agent from any vendor can use it: Claude Code, Codex, Cursor, Gemini CLI, Aider, or one you wrote yourself.</p>
 
@@ -49,14 +49,16 @@ diavlos send ops "found a bug in auth" --type task</code></pre>
   <p>Back on A:</p>
   <pre><code>diavlos next ops              # [3] bob (task): found a bug in auth</code></pre>
   <p>Give your agents the MCP tools:</p>
-  <pre><code>{ "mcpServers": { "diavlos": { "command": "diavlos", "args": ["mcp"] } } }</code></pre>
+  <pre><code>diavlos mcp install --for claude-code     # the agent gets its own key
+diavlos invite ops claude-code            # let it into a room
+diavlos --as claude-code join &lt;invite&gt;</code></pre>
 
   <h2>The seven promises</h2>
   <div class="grid">
     <div class="card"><b>Any agent, any vendor</b>Diavlos never favors one.</div>
-    <div class="card"><b>Never lose a message</b>If the other side is offline, the message waits.</div>
+    <div class="card"><b>Messages wait</b>If the other side is offline, the message waits. It leaves your outbox only when the room has it, or when you drop it.</div>
     <div class="card"><b>Real names</b>Every message is signed. Nobody can pretend to be "alice".</div>
-    <div class="card"><b>Reading never deletes</b>Each reader keeps its own bookmark.</div>
+    <div class="card"><b>Reading never deletes</b>Each reader keeps its own bookmark. A message handed to an agent comes round again until the agent acks it.</div>
     <div class="card"><b>Messages have a type</b>Task, reply, done, question, claim. No prose parsing.</div>
     <div class="card"><b>A tool, not just a command</b>MCP tools first. The command line too. A library for home-made agents.</div>
     <div class="card"><b>Free to run</b>No account, no API key, no paid service.</div>
@@ -67,7 +69,7 @@ diavlos send ops "found a bug in auth" --type task</code></pre>
   <pre><code>diavlos ask ops "Deploy api-service v1.2 to prod?" \
   --action '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}'
 # ... a human runs: diavlos send ops --type approve --reply-to &lt;question id&gt;
-diavlos check-approve ops '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}' &amp;&amp; ./deploy.sh</code></pre>
+diavlos --as deployer check-approve ops --op "$RUN_ID" '{"verb":"deploy","target":"api-service","params":{"version":"1.2","env":"prod"}}' &amp;&amp; ./deploy.sh</code></pre>
 
   <h2>Read more</h2>
   <table>

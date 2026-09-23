@@ -62,6 +62,23 @@ pub struct HelperConfig {
     /// How often retention runs, in seconds.
     #[serde(default = "default_retention_check_secs")]
     pub retention_check_secs: u64,
+    /// How long a message handed out by `next` stays the reader's before it
+    /// is handed out again, in seconds. `renew` extends it; a call can ask
+    /// for its own.
+    #[serde(default = "default_lease_secs")]
+    pub lease_secs: u64,
+    /// A message handed out this many times and never settled is
+    /// quarantined: kept, out of the way, until `deliveries replay`.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+}
+
+fn default_lease_secs() -> u64 {
+    600
+}
+
+fn default_max_attempts() -> u32 {
+    5
 }
 
 fn default_retention_check_secs() -> u64 {
@@ -93,6 +110,8 @@ impl Default for HelperConfig {
             encrypt_inbox: true,
             keychain: true,
             retention_check_secs: default_retention_check_secs(),
+            lease_secs: default_lease_secs(),
+            max_attempts: default_max_attempts(),
         }
     }
 }

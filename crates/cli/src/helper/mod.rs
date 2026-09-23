@@ -7,9 +7,13 @@
 //! helper keeps a link to the room's home and syncs what it missed.
 
 mod local;
+mod outbox;
 mod peers;
 
 mod keys;
+
+#[cfg(test)]
+mod testkit;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -63,6 +67,11 @@ pub struct Helper {
     events: broadcast::Sender<Event>,
     event_log: std::sync::Mutex<VecDeque<Event>>,
     pub metrics_addr: Option<String>,
+    /// Test-only failure points. Never armed in a real helper.
+    pub faults: diavlos_core::faults::Faults,
+    /// Test-only: seconds added to the wall clock for this helper's own
+    /// timing decisions (retries, leases).
+    clock_skew: std::sync::atomic::AtomicI64,
 }
 
 impl Helper {
@@ -77,6 +86,23 @@ impl Helper {
 
     pub fn request_shutdown(&self) {
         let _ = self.shutdown.send(true);
+    }
+
+    /// This helper's clock for retries and leases.
+    pub fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+            + chrono::Duration::seconds(self.clock_skew.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    pub fn now_ts(&self) -> String {
+        self.now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    #[cfg(test)]
+    pub fn skew_clock(&self, secs: i64) {
+        self.clock_skew
+            .fetch_add(secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn notify_room(&self, room_id: &str, seq: u64) {
@@ -129,6 +155,10 @@ impl Helper {
                 let mut r = room.clone();
                 r.paused = matches!(op, ControlOp::Pause);
                 self.store.update_room(&r)?;
+                if !r.paused {
+                    // What waited for the pause to end is due now.
+                    self.store.outbox_wake(&room.id, "paused")?;
+                }
             }
             ControlOp::Mute { name } => {
                 self.store.set_member_muted(&room.id, name, true)?;
@@ -306,6 +336,18 @@ impl Helper {
                 self.apply_control(room, &op)?;
             }
         }
+        // The home recorded a spend: evidence here, so this helper does not
+        // offer that approve again. The home's record is what counts.
+        if msg.kind == MessageType::System
+            && msg.data.get("event").and_then(|e| e.as_str()) == Some("approve_spent")
+        {
+            if let (Some(a), Some(h)) = (
+                msg.data.get("approve").and_then(|v| v.as_str()),
+                msg.data.get("action_hash").and_then(|v| v.as_str()),
+            ) {
+                self.store.approval_use(a, h, &msg.ts)?;
+            }
+        }
         Ok(member)
     }
 
@@ -406,7 +448,12 @@ impl Helper {
         let alert = self
             .store
             .check_limits(&room.id, &msg.from, &self.config.limits)?;
-        if !self.store.sequence_and_append(&mut msg)? {
+        let fresh = match &control_op {
+            // Its effect lands in the same transaction as the message.
+            Some(op) => self.store.sequence_and_append_control(&mut msg, op)?,
+            None => self.store.sequence_and_append(&mut msg)?,
+        };
+        if !fresh {
             // The same message raced in twice; the other copy won.
             return self
                 .already_sequenced(room, &msg)?
@@ -439,6 +486,74 @@ impl Helper {
         self.push_to_members(room, vec![msg.clone()], from_node)
             .await;
         Ok(msg)
+    }
+
+    /// Home side: record the spend of an approve for one operation, with a
+    /// signed audit event in the chain, or say why not. `None` means the
+    /// approve was spent before by another operation.
+    pub async fn spend_here(
+        &self,
+        room: &Room,
+        approve_id: &str,
+        action_hash: &str,
+        op_id: &str,
+        spender: &str,
+        node: &str,
+    ) -> Result<Option<diavlos_core::SpendRecord>> {
+        let (owner, owner_member) = self
+            .owner_identity(room)
+            .await?
+            .ok_or_else(|| Error::Denied("this helper does not hold the owner key".into()))?;
+        let now = now_ts();
+        let mut audit = Message::new(
+            Draft {
+                room: room.id.clone(),
+                from: owner_member.name.clone(),
+                kind: Some(MessageType::System),
+                text: format!("approve {approve_id} spent by {spender} for operation {op_id}"),
+                data: serde_json::json!({
+                    "event": "approve_spent",
+                    "approve": approve_id,
+                    "action_hash": action_hash,
+                    "op": op_id,
+                    "spender": spender,
+                    "node": node,
+                    "at": now,
+                }),
+                ..Default::default()
+            },
+            owner.as_ref(),
+        )?;
+        let req = diavlos_core::SpendRequest {
+            room_id: room.id.clone(),
+            approve_id: approve_id.to_string(),
+            action_hash: action_hash.to_string(),
+            op_id: op_id.to_string(),
+            spender: spender.to_string(),
+            node: node.to_string(),
+            now,
+        };
+        let record = match self.store.spend_approve(&req, &mut audit)? {
+            diavlos_core::SpendOutcome::SpentByAnother => return Ok(None),
+            diavlos_core::SpendOutcome::AlreadyYours(r) => r,
+            diavlos_core::SpendOutcome::Spent(r) => {
+                info!(room = %room.id, approve = %approve_id, op = %op_id, spender = %spender, "approve spent");
+                self.emit(
+                    "approve_spent",
+                    Some(&room.id),
+                    serde_json::json!({"approve": approve_id, "action_hash": action_hash, "op": op_id, "spender": spender, "node": node, "seq": audit.seq}),
+                );
+                self.notify_room(&room.id, audit.seq);
+                self.push_to_members(room, vec![audit], None).await;
+                r
+            }
+        };
+        if self.faults.hit("spend.after_commit") {
+            return Err(Error::Io(std::io::Error::other(
+                "injected fault after the spend was recorded",
+            )));
+        }
+        Ok(Some(record))
     }
 
     /// The stored copy of `msg`, if this exact signed message is already in
@@ -789,6 +904,8 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         events,
         event_log: std::sync::Mutex::new(VecDeque::new()),
         metrics_addr,
+        faults: Default::default(),
+        clock_skew: Default::default(),
     });
     helper.emit(
         "helper_up",
@@ -796,6 +913,7 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         serde_json::json!({"node": helper.net.node_id(), "version": diavlos_core::VERSION}),
     );
     tokio::spawn(retention_loop(helper.clone()));
+    tokio::spawn(checkpoint_loop(helper.clone()));
 
     // Links from other helpers.
     tokio::spawn(peers::accept_loop(helper.clone()));
@@ -822,6 +940,9 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
     local_task.abort();
     drop(listener_handle);
     helper.net.shutdown().await;
+    if let Err(e) = helper.store.checkpoint() {
+        warn!(error = %e, "checkpoint at shutdown failed");
+    }
     info!("helper down");
     // Let the log flush.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -866,6 +987,22 @@ async fn retention_loop(helper: Arc<Helper>) {
                 }
                 Err(e) => warn!(room = %room.id, error = %e, "retention failed"),
             }
+        }
+    }
+}
+
+/// Every ten minutes, fold the write-ahead log into the database and empty
+/// it, so pages of deleted rows (sent messages, dropped ones) do not stay
+/// in it. Rare on purpose: a checkpoint holds the store's lock.
+async fn checkpoint_loop(helper: Arc<Helper>) {
+    let mut shutdown = helper.shutdown_signal();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(600)) => {}
+            _ = shutdown.changed() => return,
+        }
+        if let Err(e) = helper.store.checkpoint() {
+            warn!(error = %e, "checkpoint failed");
         }
     }
 }

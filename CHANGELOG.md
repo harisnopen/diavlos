@@ -10,6 +10,95 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+### Security
+
+- An agent can no longer sign an approve with the person's key. `mcp
+  install` used to write a config that ran as `default`, the installer's
+  human key, so an agent could answer its own question with an approve that
+  `check-approve` accepted. Found by an outside review and reproduced
+  before it was fixed. Now `diavlos mcp` refuses to run as a human key,
+  judged by the key's kind rather than its label, and `diavlos_send`
+  refuses `approve`, `deny`, `control` and `system`.
+- The secret scan covers an action's verb, target and params, and the
+  trace, as well as the text and data. A key in `action.params` used to be
+  signed and sent. It also catches a `"password": "..."` written as JSON.
+- An approve is spent once, recorded by the room's home, for one named
+  operation. "Works once" used to be per machine: each helper kept its own
+  record, so two machines holding the same approve could each spend it, and
+  a helper that had not heard of a revoke still honoured it. The home now
+  decides on its own current state and writes the spend and a signed
+  `approve_spent` event to the chain together. The same operation retried
+  gets the recorded answer; any other is told no.
+- Queued messages are sealed with the inbox key before they are written.
+  They used to sit in the database in plain text. Rows an older version
+  wrote are sealed at startup. `secure_delete` is on, and the write-ahead
+  log is emptied every ten minutes and at shutdown.
+
+### Fixed
+
+- A queued message is no longer deleted when the home refuses it or the
+  link drops mid-frame. It stays until it is in the chain or a person drops
+  it: temporary failures wait and retry, a definitive refusal is kept as
+  `failed`, an unknown answer is quarantined only after it keeps coming back
+  for an hour.
+- A message `next` handed out is no longer marked read before the agent has
+  it. It is leased to the reader until the reader acks it, and handed out
+  again if the lease runs out.
+- Two messages queued in the same second could be sent in the wrong order.
+
+### Changed
+
+- **Breaking:** `mcp install` and `hook install` give each tool its own
+  agent key, named after the tool (`claude-code`, `codex`, ...), instead of
+  the installer's. Tools that write the same file share one key: Vibe Kanban
+  writes Claude Code's, and a project's `.mcp.json` serves both Claude Code
+  and Superset. An agent key starts in no rooms; let it in with `invite` and
+  `--as <key> join`. Nothing of the person's is copied to it. An existing
+  config that runs as `default` now stops with a message saying what to do.
+  After upgrading, run `diavlos stop` once so the helper restarts as the
+  new version; `diavlos mcp` says so if a helper from before is still
+  running.
+- **Breaking:** `read` only looks: it no longer moves the bookmark.
+  `read --ack` (and `ack` in MCP and the libraries) settles exactly the
+  messages it returned. Anything that polled with `read` should use `next`,
+  or add `--ack`.
+- **Breaking:** `check-approve` runs as a member of the room (`--as`) and
+  asks the room's home, which must be reachable: exit 3 when it is not,
+  and nothing is spent. A helper older than this one cannot record spends;
+  upgrade the home first, then every helper that runs `check-approve`.
+- `next` acks once it has printed the message; `--manual-ack` prints a
+  token instead. `diavlos_next` over MCP returns the message and its token.
+  `watch` acks when its script succeeds and hands the message back when it
+  fails. The Python and Node loops ack a message when asked for the next
+  one. The wake-up hook only peeks, so its reminder comes back until the
+  agent acks. The bridges ack after the other service confirms the post.
+- Control messages (grant, pause, mute, revoke, hold) take effect in the
+  same transaction as the message.
+- `diavlos-core`: `Error::OverBudget` carries the seconds until the limit
+  lets the next message through, `OverBudget(String, Option<u64>)`, and
+  `Error::fate()` says whether a failure is temporary or definitive.
+- The docs stop claiming more than the code does. "Secrets never leave the
+  machine" becomes what the scan is, a guard against accidents. "Never lose
+  a message" becomes "Messages wait", and a new *Known limits* section says
+  what is still not guaranteed. The threat model says plainly that an
+  agent with a shell on the same OS account can act as the person, and that
+  keeping agents off the key by default is not a wall against that.
+
+### Added
+
+- `whoami` on the local protocol: a key's label, name, kind and fingerprint.
+- `diavlos outbox [list|retry|drop]`: every queued message, its state and
+  why. `status` and `doctor` count failed and quarantined ones.
+- `diavlos ack|renew|nack <token>`, `next --manual-ack --lease <secs>`,
+  `diavlos deliveries <room> [--replay <seq>]`; MCP tools `diavlos_ack`,
+  `diavlos_renew`, `diavlos_nack`; `ack`, `renew`, `nack` and `take` in the
+  libraries. Config `lease_secs` (600) and `max_attempts` (5).
+- `check-approve --op <id>`: name the operation, so a retry gets the
+  recorded answer.
+- Error frames between helpers say whether a failure is temporary or
+  definitive (`fate`) and when trying again can work (`retry_after`).
+  Older helpers ignore both.
+
 ## [1.1.0] — 2026-09-23
 
 1.0.1 was prepared but never released; its changes ship here.

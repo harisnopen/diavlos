@@ -12,6 +12,7 @@ pub mod bundle;
 pub mod canonical;
 pub mod control;
 pub mod error;
+pub mod faults;
 pub mod invite;
 pub mod keys;
 pub mod limits;
@@ -23,14 +24,17 @@ pub mod secrets;
 pub mod store;
 
 pub use control::ControlOp;
-pub use error::{Error, Result};
+pub use error::{Error, Fate, Result};
 pub use invite::{Invite, InviteSpec};
 pub use keys::{Identity, Kind, Profile, PublicKey, SignedProfile, Signer};
 pub use limits::Limits;
 pub use message::{Action, AgentInfo, DataClass, Draft, Message, MessageType};
 pub use policy::{DefaultHook, Policy, PolicyHook};
 pub use room::{Member, Role, Room};
-pub use store::{LocalMember, Store};
+pub use store::{
+    Delivery, DeliveryState, LocalMember, OutboxCounts, OutboxEntry, OutboxState, Settle,
+    SpendOutcome, SpendRecord, SpendRequest, Store,
+};
 
 /// Version of this crate, for the version handshake.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

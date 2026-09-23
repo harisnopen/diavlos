@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use diavlos_client::proto::{
-    AskResult, CheckApproveResult, DraftWire, ExportResult, InviteResult, JoinResult, ReadResult,
-    Request, RotateResult, SendResult, StatusResult, WhoEntry,
+    AskResult, CheckApproveResult, DeliveryItem, DraftWire, ExportResult, InviteResult, JoinResult,
+    NextResult, OutboxItem, ReadResult, Request, RotateResult, SendResult, StatusResult, WhoEntry,
 };
 use diavlos_client::{Client, Paths};
 use diavlos_core::{ControlOp, DataClass, Error, Message, MessageType, Role};
@@ -127,22 +127,67 @@ enum Cmd {
         json: bool,
     },
     /// Wait for the next message from someone else. Skips your own and
-    /// helper notices.
+    /// helper notices. Acks it once printed: that is receipt, not "your
+    /// script finished". For that, use --manual-ack and `diavlos ack`.
     Next {
         room: String,
         /// Give up after this many seconds (exit code 4). Default: wait.
         #[arg(long)]
         timeout: Option<u64>,
+        /// Do not ack. Prints a token; the message stays yours until you
+        /// `diavlos ack` it, `nack` it, or the lease runs out, and is then
+        /// handed out again.
+        #[arg(long)]
+        manual_ack: bool,
+        /// How long it stays yours, in seconds. Default 600.
+        #[arg(long)]
+        lease: Option<u64>,
         #[arg(long)]
         json: bool,
     },
-    /// Read from your bookmark onward. Never deletes.
+    /// Look at messages from your bookmark onward. Never deletes and
+    /// moves nothing, unless --ack.
     Read {
         room: String,
         #[arg(long)]
         since: Option<u64>,
         #[arg(long, default_value_t = 50)]
         limit: u32,
+        /// Settle what this prints as taken on.
+        #[arg(long)]
+        ack: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Settle a message from `next --manual-ack`: taken on. Not "finished":
+    /// say `done` in the room for that.
+    Ack {
+        token: String,
+    },
+    /// Still working on it: keep it yours longer.
+    Renew {
+        token: String,
+        /// Seconds from now. Default 600.
+        #[arg(long)]
+        lease: Option<u64>,
+    },
+    /// Not now: hand it out again later.
+    Nack {
+        token: String,
+        /// Seconds until it is handed out again.
+        #[arg(long = "retry-in", default_value_t = 60)]
+        retry_in: u64,
+    },
+    /// Messages handed out and not simply done: leased, delayed, and
+    /// quarantined after being handed out too many times.
+    Deliveries {
+        room: String,
+        /// Every key on this helper, not only --as.
+        #[arg(long)]
+        all: bool,
+        /// Bring this quarantined message (seq) back to be handed out again.
+        #[arg(long, value_name = "SEQ")]
+        replay: Option<u64>,
         #[arg(long)]
         json: bool,
     },
@@ -181,10 +226,17 @@ enum Cmd {
         reason: String,
     },
     /// Exit 0 if a valid, unexpired, unused human approve exists for
-    /// exactly this action. For deploy scripts to call before they act.
+    /// exactly this action and the room's home records its spend. For
+    /// deploy scripts to call before they act. Exit 6: no; exit 3: the
+    /// home is out of reach, nothing spent, try again.
     CheckApprove {
         room: String,
         action_json: String,
+        /// Your id for this operation, the same on every retry of it: a
+        /// retry then gets the recorded answer, not a refusal. Deduplicate
+        /// on it where you act.
+        #[arg(long = "op", value_name = "ID")]
+        op_id: Option<String>,
     },
     /// Kill switch. Nothing moves until resume.
     Pause {
@@ -250,6 +302,12 @@ enum Cmd {
     Service {
         #[command(subcommand)]
         action: ServiceCmd,
+    },
+    /// Messages still to reach a room's home, and ones it would not take.
+    /// Nothing leaves the outbox except by reaching the home or by `drop`.
+    Outbox {
+        #[command(subcommand)]
+        which: Option<OutboxCmd>,
     },
     /// See rooms and peers.
     Status {
@@ -338,6 +396,23 @@ enum McpCmd {
         #[arg(long)]
         list: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum OutboxCmd {
+    /// Every queued message, its state and why. The default.
+    List {
+        /// Only this room.
+        room: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put a failed or quarantined message back in line, unchanged: same
+    /// id, same signature.
+    Retry { id: String },
+    /// Give up on a failed or quarantined message. Its content is wiped;
+    /// a record that it was dropped stays.
+    Drop { id: String },
 }
 
 #[derive(Subcommand)]
@@ -717,23 +792,54 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
         Cmd::Next {
             room,
             timeout,
+            manual_ack,
+            lease,
             json,
         } => {
             let v = client
                 .call(&Request::Next {
                     room,
-                    identity,
+                    identity: identity.clone(),
                     timeout_secs: timeout.unwrap_or(0),
+                    manual_ack: true,
+                    lease_secs: lease,
                 })
                 .await?;
-            let m: Message = serde_json::from_value(v)?;
-            print_message(&m, json)?;
+            let r: NextResult = serde_json::from_value(v)?;
+            if manual_ack {
+                if json {
+                    println!("{}", serde_json::to_string(&r)?);
+                } else {
+                    print_message(&r.message, false)?;
+                    println!(
+                        "  token {} (yours until {}, attempt {}): diavlos ack {}",
+                        r.delivery.token,
+                        r.delivery.lease_until,
+                        r.delivery.attempt,
+                        r.delivery.token
+                    );
+                }
+                return Ok(0);
+            }
+            print_message(&r.message, json)?;
+            // Printed: that is receipt. If the ack does not land, the
+            // message is handed out again once the lease runs out.
+            if let Err(e) = client
+                .call(&Request::Ack {
+                    identity,
+                    token: r.delivery.token,
+                })
+                .await
+            {
+                eprintln!("warning: could not ack it ({e}); it will be handed out again");
+            }
             Ok(0)
         }
         Cmd::Read {
             room,
             since,
             limit,
+            ack,
             json,
         } => {
             let v = client
@@ -742,6 +848,7 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                     identity,
                     since,
                     limit,
+                    ack,
                 })
                 .await?;
             let r: ReadResult = serde_json::from_value(v)?;
@@ -750,18 +857,114 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             }
             Ok(0)
         }
+        Cmd::Ack { token } => {
+            client.call(&Request::Ack { identity, token }).await?;
+            println!("acked");
+            Ok(0)
+        }
+        Cmd::Renew { token, lease } => {
+            let v = client
+                .call(&Request::Renew {
+                    identity,
+                    token,
+                    lease_secs: lease,
+                })
+                .await?;
+            println!(
+                "yours until {}",
+                v["lease_until"].as_str().unwrap_or("later")
+            );
+            Ok(0)
+        }
+        Cmd::Nack { token, retry_in } => {
+            let v = client
+                .call(&Request::Nack {
+                    identity,
+                    token,
+                    retry_in_secs: Some(retry_in),
+                })
+                .await?;
+            match v["state"].as_str() {
+                Some("quarantined") => println!(
+                    "handed back, and quarantined: it has been handed out too many times. \
+                     `diavlos deliveries <room>` lists it"
+                ),
+                _ => println!(
+                    "handed back; it comes round again at {}",
+                    v["retry_at"].as_str().unwrap_or("?")
+                ),
+            }
+            Ok(0)
+        }
+        Cmd::Deliveries {
+            room,
+            all,
+            replay,
+            json,
+        } => {
+            if let Some(seq) = replay {
+                client
+                    .call(&Request::Replay {
+                        room,
+                        identity,
+                        seq,
+                    })
+                    .await?;
+                println!("message {seq} will be handed out again next");
+                return Ok(0);
+            }
+            let v = client
+                .call(&Request::Deliveries {
+                    room,
+                    identity,
+                    all,
+                })
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(0);
+            }
+            let items: Vec<DeliveryItem> = serde_json::from_value(v)?;
+            if items.is_empty() {
+                println!("nothing handed out and waiting");
+            }
+            for d in items {
+                let when = match d.state.as_str() {
+                    "leased" => format!(" until {}", d.lease_until.unwrap_or_default()),
+                    "delayed" => format!(" until {}", d.retry_at.unwrap_or_default()),
+                    _ => String::new(),
+                };
+                println!(
+                    "[{}] {} ({}) to {}: {}{}, handed out {} time{}\n    {}",
+                    d.seq,
+                    d.from,
+                    d.kind.map(|k| k.as_str()).unwrap_or("?"),
+                    d.reader,
+                    d.state,
+                    when,
+                    d.attempt,
+                    if d.attempt == 1 { "" } else { "s" },
+                    d.text
+                );
+            }
+            Ok(0)
+        }
         Cmd::Watch { room, exec, json } => {
             let mut stream = client
                 .stream(&Request::Watch {
                     room: room.clone(),
-                    identity,
+                    identity: identity.clone(),
+                    manual_ack: true,
                 })
                 .await?;
             while let Some(v) = stream.next().await? {
                 let m: Message = serde_json::from_value(v["message"].clone())?;
+                let token = v["delivery"]["token"].as_str().unwrap_or("").to_string();
                 print_message(&m, json)?;
+                let mut handled = true;
                 if let Some(script) = &exec {
                     let status = std::process::Command::new(script)
+                        .env("DIAVLOS_TOKEN", &token)
                         .env("DIAVLOS_MESSAGE", serde_json::to_string(&m)?)
                         .env("DIAVLOS_ROOM", &room)
                         .env("DIAVLOS_ID", &m.id)
@@ -777,12 +980,33 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                         .env("DIAVLOS_REPLY_TO", m.reply_to.clone().unwrap_or_default())
                         .env("DIAVLOS_TRACE", m.trace.clone().unwrap_or_default())
                         .status();
-                    match status {
-                        Ok(s) if s.success() => {}
-                        Ok(s) => eprintln!("script exited with {s} for {}", m.id),
-                        Err(e) => eprintln!("could not run {script}: {e}"),
-                    }
+                    handled = match status {
+                        Ok(s) if s.success() => true,
+                        Ok(s) => {
+                            eprintln!("script exited with {s} for {}; handing it back", m.id);
+                            false
+                        }
+                        Err(e) => {
+                            eprintln!("could not run {script}: {e}; handing it back");
+                            false
+                        }
+                    };
                 }
+                // Ack once handled; a failed script hands it back, and after
+                // too many tries it is quarantined, never dropped.
+                let settle = if handled {
+                    Request::Ack {
+                        identity: identity.clone(),
+                        token,
+                    }
+                } else {
+                    Request::Nack {
+                        identity: identity.clone(),
+                        token,
+                        retry_in_secs: Some(30),
+                    }
+                };
+                client.call(&settle).await?;
             }
             Ok(0)
         }
@@ -886,14 +1110,25 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             println!("denied ({})", r.message.id);
             Ok(0)
         }
-        Cmd::CheckApprove { room, action_json } => {
+        Cmd::CheckApprove {
+            room,
+            action_json,
+            op_id,
+        } => {
             let action: diavlos_core::Action = serde_json::from_str(&action_json)
                 .map_err(|e| Error::Invalid(format!("action is not valid: {e}")))?;
-            let v = client.call(&Request::CheckApprove { room, action }).await?;
+            let v = client
+                .call(&Request::CheckApprove {
+                    room,
+                    action,
+                    identity,
+                    op_id,
+                })
+                .await?;
             let r: CheckApproveResult = serde_json::from_value(v)?;
             println!(
-                "approved by {} ({}), valid until {}. Spent.",
-                r.approved_by, r.approve_id, r.expires
+                "approved by {} ({}), valid until {}. Spent for operation {} (audit seq {}).",
+                r.approved_by, r.approve_id, r.expires, r.op_id, r.audit_seq
             );
             Ok(0)
         }
@@ -1043,6 +1278,56 @@ matches `diavlos who`, or pass --owner."
             }
             Ok(0)
         }
+        Cmd::Outbox { which } => match which.unwrap_or(OutboxCmd::List {
+            room: None,
+            json: false,
+        }) {
+            OutboxCmd::List { room, json } => {
+                let v = client.call(&Request::Outbox { room }).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(0);
+                }
+                let items: Vec<OutboxItem> = serde_json::from_value(v)?;
+                if items.is_empty() {
+                    println!("the outbox is empty: everything sent has reached its room");
+                }
+                for i in items {
+                    let mut line = format!(
+                        "{}  {}  {}  {:<11} {} attempt{}",
+                        i.id,
+                        i.room,
+                        i.sender,
+                        i.state,
+                        i.attempts,
+                        if i.attempts == 1 { "" } else { "s" }
+                    );
+                    if let Some(at) = &i.retry_at {
+                        line.push_str(&format!(", next try {at}"));
+                    }
+                    if let Some(r) = &i.reason {
+                        line.push_str(&format!("\n    {r}"));
+                    }
+                    if !i.text.is_empty() {
+                        line.push_str(&format!("\n    {}", i.text));
+                    }
+                    println!("{line}");
+                }
+                Ok(0)
+            }
+            OutboxCmd::Retry { id } => {
+                client
+                    .call(&Request::OutboxRetry { id: id.clone() })
+                    .await?;
+                println!("{id} is back in line; it goes as soon as the home takes it");
+                Ok(0)
+            }
+            OutboxCmd::Drop { id } => {
+                client.call(&Request::OutboxDrop { id: id.clone() }).await?;
+                println!("dropped {id}; its content is gone, a record stays");
+                Ok(0)
+            }
+        },
         Cmd::Status { json } => {
             let v = client.call(&Request::Status).await?;
             let s: StatusResult = serde_json::from_value(v)?;
@@ -1058,6 +1343,17 @@ matches `diavlos who`, or pass --owner."
                 println!("no rooms yet. Try: diavlos new <room>");
             }
             for r in &s.rooms {
+                let mut outbox = String::new();
+                for (n, what) in [
+                    (r.queued, "queued"),
+                    (r.failed, "failed"),
+                    (r.quarantined, "quarantined"),
+                    (r.quarantined_deliveries, "undeliverable"),
+                ] {
+                    if n > 0 {
+                        outbox.push_str(&format!(", {n} {what}"));
+                    }
+                }
                 println!(
                     "  {:<20} {:<7} {:<9} {} members, {} messages{}{} (you: {})",
                     r.name,
@@ -1065,14 +1361,16 @@ matches `diavlos who`, or pass --owner."
                     if r.connected { "linked" } else { "offline" },
                     r.members,
                     r.messages,
-                    if r.queued > 0 {
-                        format!(", {} queued", r.queued)
-                    } else {
-                        String::new()
-                    },
+                    outbox,
                     if r.paused { ", paused" } else { "" },
                     r.me.join(", "),
                 );
+                if r.failed + r.quarantined > 0 {
+                    println!("  {:<20} see: diavlos outbox {}", "", r.name);
+                }
+                if r.quarantined_deliveries > 0 {
+                    println!("  {:<20} see: diavlos deliveries {} --all", "", r.name);
+                }
             }
             Ok(0)
         }
@@ -1165,13 +1463,15 @@ async fn hook_run(
         return Ok(0);
     }
 
-    // Read from the bookmark without waiting. A hook must never hold up a
-    // turn, so any failure here is silence, not an error.
+    // Look at what is owed without taking it, and without waiting. Showing
+    // a message is not the agent accepting it: it stays owed, and this
+    // reminder comes back, until the agent takes it with diavlos_next and
+    // acks it. A hook must never hold up a turn, so any failure here is
+    // silence, not an error. Own messages and housekeeping are never owed.
     let v = match client
-        .call(&Request::Read {
+        .call(&Request::Peek {
             room: room.to_string(),
             identity: identity.to_string(),
-            since: None,
             limit: 20,
         })
         .await
@@ -1179,17 +1479,10 @@ async fn hook_run(
         Ok(v) => v,
         Err(_) => return Ok(0),
     };
-    let Ok(r) = serde_json::from_value::<ReadResult>(v) else {
+    let Ok(owed) = serde_json::from_value::<Vec<Message>>(v) else {
         return Ok(0);
     };
-    // Skip our own messages and the helper's notices: an agent does not
-    // need waking for what it just said.
-    let mine: Vec<Message> = r
-        .messages
-        .into_iter()
-        .filter(|m| m.from != identity && m.kind != MessageType::System)
-        .collect();
-    if let Some(out) = hook::decide(&mine, stop_hook_active, session_start) {
+    if let Some(out) = hook::decide(&owed, stop_hook_active, session_start) {
         println!("{out}");
     }
     Ok(0)
@@ -1248,9 +1541,30 @@ fn mcp_install(
         }
     };
 
+    // One key per file: tools that share a file act as the same key. A tool
+    // with no file for this scope fails on its own; the rest still install.
     let mut failed = 0;
-    for t in targets {
-        match install::install(t, project, identity, explicit_home.as_deref(), dry_run) {
+    let mut located = Vec::new();
+    for t in &targets {
+        match install::target_path(t, project) {
+            Ok(path) => located.push((*t, path)),
+            Err(e) => {
+                eprintln!("{:<14} {e:#}", t.label);
+                failed += 1;
+            }
+        }
+    }
+    let planned = install::plan_keys(&located, identity);
+
+    let mut keys: Vec<String> = Vec::new();
+    for ((t, _), (key, shared_with)) in located.into_iter().zip(planned) {
+        if let Some(first) = shared_with {
+            println!(
+                "{:<14} shares its file with {first}, so it acts as the same key",
+                t.label
+            );
+        }
+        match install::install(t, project, &key, explicit_home.as_deref(), dry_run) {
             Ok(o) => {
                 let what = if dry_run {
                     if o.changed {
@@ -1264,6 +1578,13 @@ fn mcp_install(
                     "already set"
                 };
                 println!("{:<14} {what} {}", o.tool, o.path.display());
+                println!(
+                    "{:<14} acts as the agent key {:?}, not as you",
+                    "", o.identity
+                );
+                if !keys.contains(&o.identity) {
+                    keys.push(o.identity.clone());
+                }
                 if let Some(b) = &o.backup {
                     println!("{:<14} kept a copy of the old file at {}", "", b.display());
                 }
@@ -1283,7 +1604,18 @@ fn mcp_install(
         return Ok(1);
     }
     if !dry_run {
-        println!("\nRestart the tool and the room tools are there: diavlos_send, diavlos_next, diavlos_ask and five more.");
+        let first = keys.first().map(String::as_str).unwrap_or("<agent>");
+        println!(
+            "\nAn agent key starts in no rooms. Let it into each room it should see, as the owner:\n\n  \
+             diavlos invite <room> {first}\n  \
+             diavlos --as {first} join <invite>"
+        );
+        if keys.len() > 1 {
+            println!("\nThe same for {}.", keys[1..].join(", "));
+        }
+        println!(
+            "\nThen restart the tool: diavlos_send, diavlos_next, diavlos_ask and eight more."
+        );
     }
     Ok(0)
 }
@@ -1310,4 +1642,23 @@ fn print_message(m: &Message, json: bool) -> Result<(), Error> {
         println!("{head}: {}", m.text);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod startup {
+    /// Parsing every command must fit well inside the main thread's stack
+    /// (8 MiB, asked for on Windows by build.rs). Half of it here, so growth
+    /// shows up long before a real overflow.
+    #[test]
+    fn parsing_the_command_line_fits_in_half_the_main_stack() {
+        let t = std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .spawn(|| {
+                use clap::CommandFactory;
+                super::Cli::command().debug_assert();
+                <super::Cli as clap::Parser>::try_parse_from(["diavlos", "status"]).is_ok()
+            })
+            .unwrap();
+        assert!(t.join().unwrap());
+    }
 }

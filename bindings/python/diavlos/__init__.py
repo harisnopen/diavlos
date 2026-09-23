@@ -1,7 +1,14 @@
 """Diavlos: the channel between AI agents.
 
-Same eight calls as the MCP tools: send, ask, next, read, claim, release,
-who, rooms. Everything goes through the local helper, started on first use.
+The same calls as the MCP tools: send, ask, next, read, claim, release,
+who, rooms, and ack, renew and nack for messages you hold. Everything goes
+through the local helper, started on first use.
+
+Messages from `next()` and `watch()` are held for you, not handed over and
+forgotten: each stays yours until it is acknowledged, and comes round again
+if it never is. Both loops acknowledge a message when you ask for the next
+one, so a loop that dies half way through gets it again. If you break out
+of a loop after finishing a message, call `room.ack(msg)` first.
 """
 
 from __future__ import annotations
@@ -213,19 +220,53 @@ class Room:
                          timeout_secs=timeout)
         return Message(r["reply"])
 
-    def next_one(self, timeout: int = 0) -> Message:
-        """The next message from someone else. `timeout` 0 waits forever."""
-        return Message(self._h.call("next", room=self.room, identity=self.identity,
-                                    timeout_secs=timeout))
+    def next_one(self, timeout: int = 0, ack: bool = True,
+                 lease: Optional[int] = None) -> Message:
+        """The next message from someone else. `timeout` 0 waits forever.
+
+        With `ack=True` it is acknowledged as soon as it is handed over. With
+        `ack=False` it stays yours until you call `ack`, `nack`, or the lease
+        (`lease` seconds, default 600) runs out, and then comes round again;
+        `msg.delivery` holds the token."""
+        r = self._h.call("next", room=self.room, identity=self.identity,
+                         timeout_secs=timeout, manual_ack=not ack, lease_secs=lease)
+        if ack:
+            return Message(r)
+        msg = Message(r["message"])
+        msg["delivery"] = r["delivery"]
+        return msg
 
     def next(self, timeout: int = 0) -> Iterator[Message]:
         """Loop over messages from others as they arrive:
-        `for msg in room.next(): ...`"""
+        `for msg in room.next(): ...`. Each is acknowledged when you ask for
+        the next one."""
+        held: Optional[Message] = None
         while True:
-            yield self.next_one(timeout)
+            if held is not None:
+                self.ack(held)
+                held = None
+            held = self.next_one(timeout, ack=False)
+            yield held
 
-    def read(self, since: Optional[int] = None, limit: int = 50) -> List[Message]:
-        r = self._h.call("read", room=self.room, identity=self.identity, since=since, limit=limit)
+    def ack(self, msg: Any) -> None:
+        """You have taken this message on. Not "finished": say done in the
+        room for that. Takes a message from `next`/`watch`, or its token."""
+        self._h.call("ack", identity=self.identity, token=_token(msg))
+
+    def renew(self, msg: Any, lease: Optional[int] = None) -> None:
+        """Still working on it: keep it yours `lease` seconds more."""
+        self._h.call("renew", identity=self.identity, token=_token(msg), lease_secs=lease)
+
+    def nack(self, msg: Any, retry_in: int = 60) -> None:
+        """Not now: hand it out again in `retry_in` seconds."""
+        self._h.call("nack", identity=self.identity, token=_token(msg), retry_in_secs=retry_in)
+
+    def read(self, since: Optional[int] = None, limit: int = 50,
+             ack: bool = False) -> List[Message]:
+        """Look at messages from your bookmark (or `since`). Moves nothing,
+        unless `ack=True`, which settles exactly the messages returned."""
+        r = self._h.call("read", room=self.room, identity=self.identity, since=since,
+                         limit=limit, ack=ack)
         return [Message(m) for m in r["messages"]]
 
     def claim(self, task_id: str) -> Message:
@@ -240,9 +281,25 @@ class Room:
         return self._h.call("who", room=self.room)
 
     def watch(self) -> Iterator[Message]:
-        """Stream messages from your bookmark onward, then live."""
-        for item in self._h.stream("watch", room=self.room, identity=self.identity):
-            yield Message(item["message"])
+        """Stream messages from your bookmark onward, then live. Each is
+        acknowledged when you ask for the next one."""
+        stream = self._h.stream("watch", room=self.room, identity=self.identity,
+                                manual_ack=True)
+        for item in stream:
+            msg = Message(item["message"])
+            msg["delivery"] = item.get("delivery")
+            yield msg
+            self.ack(msg)
+
+
+def _token(msg: Any) -> str:
+    if isinstance(msg, str):
+        return msg
+    delivery = msg.get("delivery") if isinstance(msg, dict) else None
+    if not delivery or "token" not in delivery:
+        raise DiavlosError(1, "that message was not held for you: take it with "
+                              "next_one(ack=False), next() or watch()")
+    return delivery["token"]
 
 
 def rooms(home: Optional[str] = None) -> List[Dict[str, Any]]:

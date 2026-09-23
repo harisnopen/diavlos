@@ -38,9 +38,21 @@ async function main() {
       if (msg.type === 'task') {
         const done = await room.send('did y', { type: 'done', reply_to: msg.id });
         assert.strictEqual(done.reply_to, msg.id);
+        await room.ack(msg); // breaking out: settle this one ourselves
         break;
       }
     }
+
+    // A message held and never acked comes round again.
+    cli(a, ['send', 'ops', 'again?', '--type', 'task']);
+    const held = await room.next(20, { ack: false, lease: 1 });
+    assert.strictEqual(held.delivery.attempt, 1);
+    await new Promise(r => setTimeout(r, 2000));
+    const back = await room.next(20, { ack: false });
+    assert.strictEqual(back.id, held.id);
+    assert.strictEqual(back.delivery.attempt, 2);
+    await assert.rejects(room.ack(held), e => e.code === 6);
+    await room.ack(back);
     const who = await room.who();
     assert.deepStrictEqual(who.map(w => w.name).sort(), ['haris', 'nodebot']);
 

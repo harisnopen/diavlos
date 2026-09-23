@@ -16,7 +16,7 @@
       "mcpServers": {
         "diavlos": {
           "command": "diavlos",
-          "args": ["mcp"]
+          "args": ["--as", "claude-code", "mcp"]
         }
       },
       "displayName": "Diavlos",

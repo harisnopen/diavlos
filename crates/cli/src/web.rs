@@ -157,6 +157,7 @@ async fn api_messages(
             identity: app.identity.clone(),
             since: Some(since),
             limit,
+            ack: false,
         };
         let client = &app.client;
         async move { client.call(&req).await }

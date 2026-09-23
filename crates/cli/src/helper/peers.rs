@@ -7,10 +7,11 @@ use std::time::Duration;
 use diavlos_core::{
     message::now_ts, Error, Invite, Member, Message, Result, Room, PROTOCOL_VERSION,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
+use super::outbox::flush_outbox;
 use super::Helper;
-use crate::net::{sync_signing_bytes, Link, Wire, SYNC_BATCH};
+use crate::net::{spend_signing_bytes, sync_signing_bytes, Link, Wire, SYNC_BATCH};
 
 /// Take every link other helpers open to us.
 pub async fn accept_loop(helper: Arc<Helper>) {
@@ -27,7 +28,7 @@ pub async fn accept_loop(helper: Arc<Helper>) {
 }
 
 /// Answer requests on one incoming link until it closes.
-async fn serve_link(helper: Arc<Helper>, link: Arc<dyn Link>) -> Result<()> {
+pub(super) async fn serve_link(helper: Arc<Helper>, link: Arc<dyn Link>) -> Result<()> {
     let mut greeted = false;
     loop {
         let (req, reply) = link.next_request().await?;
@@ -41,14 +42,11 @@ async fn serve_link(helper: Arc<Helper>, link: Arc<dyn Link>) -> Result<()> {
                         version: diavlos_core::VERSION.into(),
                     }
                 }
-                Wire::Hello { v, .. } => Wire::Err {
-                    code: 1,
-                    msg: format!("protocol version {v} is not supported here (this helper speaks {PROTOCOL_VERSION})"),
-                },
-                _ => Wire::Err {
-                    code: 1,
-                    msg: "say hello first".into(),
-                },
+                Wire::Hello { v, .. } => Wire::err(
+                    1,
+                    format!("protocol version {v} is not supported here (this helper speaks {PROTOCOL_VERSION})"),
+                ),
+                _ => Wire::err(1, "say hello first"),
             }
         } else {
             match handle(&helper, &link, req).await {
@@ -147,6 +145,63 @@ async fn handle(helper: &Arc<Helper>, link: &Arc<dyn Link>, req: Wire) -> Result
                 Ok(seq) => Ok(Wire::Ack { seq }),
                 Err(Error::Invalid(_)) => Ok(Wire::NeedSync { room_id: room.id }),
                 Err(e) => Err(e),
+            }
+        }
+        Wire::Spend {
+            room_id,
+            approve_id,
+            action_hash,
+            op_id,
+            spender,
+            node,
+            ts,
+            sig,
+        } => {
+            let room = helper
+                .store
+                .room_by_id(&room_id)?
+                .ok_or(Error::NotInRoom(room_id))?;
+            if !helper.is_home(&room) {
+                return Err(Error::Denied("not the home of that room".into()));
+            }
+            let member = helper
+                .store
+                .member_by_name(&room.id, &spender)?
+                .ok_or_else(|| Error::Denied(format!("{spender} is not a member")))?;
+            member.key.verify(
+                &spend_signing_bytes(
+                    &room.id,
+                    &approve_id,
+                    &action_hash,
+                    &op_id,
+                    &spender,
+                    &node,
+                    &ts,
+                ),
+                &sig,
+            )?;
+            // The node it says it acts from is the one asking.
+            if node != link.remote_node() {
+                return Err(Error::Denied(
+                    "a spend is asked for from the node that acts".into(),
+                ));
+            }
+            let age = chrono::DateTime::parse_from_rfc3339(&ts)
+                .map(|t| {
+                    (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .abs()
+                })
+                .unwrap_or(i64::MAX);
+            if age > 300 {
+                return Err(Error::Denied("spend request is too old".into()));
+            }
+            match helper
+                .spend_here(&room, &approve_id, &action_hash, &op_id, &spender, &node)
+                .await?
+            {
+                Some(record) => Ok(Wire::Spent { record }),
+                None => Ok(Wire::AlreadySpent { approve_id }),
             }
         }
         Wire::Hello { .. } => Ok(Wire::HelloOk {
@@ -373,6 +428,9 @@ async fn serve_home_link(
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     sync_from_home(helper, room, link).await?;
+    // A new link is news for anything that waited because the old one
+    // failed: try those now rather than at their backed-off time.
+    helper.store.outbox_wake(&room.id, "transport")?;
     flush_outbox(helper, room, link).await?;
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     tick.tick().await;
@@ -387,7 +445,7 @@ async fn serve_home_link(
                         Err(e) => Wire::error(&e),
                     },
                     Wire::Hello { .. } => Wire::HelloOk { v: PROTOCOL_VERSION, version: diavlos_core::VERSION.into() },
-                    other => Wire::Err { code: 1, msg: format!("unexpected {}", other.label()) },
+                    other => Wire::err(1, format!("unexpected {}", other.label())),
                 };
                 let need_sync = matches!(resp, Wire::NeedSync { .. });
                 reply.send(&resp).await?;
@@ -453,58 +511,5 @@ pub async fn sync_from_home(helper: &Helper, room: &Room, link: &Arc<dyn Link>) 
             }
             other => return Err(Error::Invalid(format!("unexpected {}", other.label()))),
         }
-    }
-}
-
-/// Send every queued message to the home, in order.
-pub async fn flush_outbox(helper: &Helper, room: &Room, link: &Arc<dyn Link>) -> Result<()> {
-    let lock = helper.submit_lock(&room.id).await;
-    let _guard = lock.lock().await;
-    for msg in helper.store.outbox_list(&room.id)? {
-        match submit(helper, room, link, &msg).await {
-            Ok(_) => {}
-            Err(Error::ReachedNobody(e)) => {
-                helper.store.outbox_note_failure(&msg.id, &e)?;
-                return Err(Error::ReachedNobody(e));
-            }
-            Err(Error::RoomPaused(e)) => {
-                // Nothing moves until resume. Keep it queued.
-                helper.store.outbox_note_failure(&msg.id, &e)?;
-                return Ok(());
-            }
-            Err(e) => {
-                warn!(room = %room.id, id = %msg.id, error = %e, "queued message refused by home; dropped");
-                helper.store.outbox_remove(&msg.id)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Submit one message to the home and store the sequenced copy.
-pub async fn submit(
-    helper: &Helper,
-    room: &Room,
-    link: &Arc<dyn Link>,
-    msg: &Message,
-) -> Result<Message> {
-    let req = Wire::Submit {
-        room_id: room.id.clone(),
-        message: msg.clone(),
-    };
-    match link.request(&req).await?.into_result()? {
-        Wire::Sequenced { message } => {
-            match helper.apply_from_home(room, std::slice::from_ref(&message)) {
-                Ok(_) => {}
-                Err(Error::Invalid(_)) => {
-                    // We are behind. Catch up; the sync brings this one too.
-                    sync_from_home(helper, room, link).await?;
-                }
-                Err(e) => return Err(e),
-            }
-            helper.store.outbox_remove(&msg.id)?;
-            Ok(message)
-        }
-        other => Err(Error::Invalid(format!("unexpected {}", other.label()))),
     }
 }

@@ -9,7 +9,7 @@ pub mod iroh;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use diavlos_core::{Error, Member, Message, Result, Room, SignedProfile};
+use diavlos_core::{Error, Fate, Member, Message, Result, Room, SignedProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -84,9 +84,40 @@ pub enum Wire {
     NeedSync {
         room_id: String,
     },
+    /// A member is about to act on an approve and asks the room's home to
+    /// record the spend. Signed by the member's key over every field (see
+    /// [`spend_signing_bytes`]), so the binding to this room, approve,
+    /// action, operation and node cannot be swapped.
+    Spend {
+        room_id: String,
+        approve_id: String,
+        action_hash: String,
+        /// Unique per operation; the same on every retry of it.
+        op_id: String,
+        spender: String,
+        node: String,
+        ts: String,
+        sig: String,
+    },
+    /// The spend is recorded (now, or before for this same operation).
+    Spent {
+        record: diavlos_core::SpendRecord,
+    },
+    /// That approve was spent before, by another operation.
+    AlreadySpent {
+        approve_id: String,
+    },
+    /// A refusal or failure. `fate` says whether the sender should keep
+    /// the message and try again (temporary) or stop (definitive); an old
+    /// helper leaves it out, and the sender then goes by `code`.
+    /// `retry_after` is how many seconds until trying again can work.
     Err {
         code: i32,
         msg: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fate: Option<Fate>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after: Option<u64>,
     },
 }
 
@@ -95,13 +126,25 @@ impl Wire {
         Wire::Err {
             code: e.code(),
             msg: e.to_string(),
+            fate: e.fate(),
+            retry_after: e.retry_after(),
+        }
+    }
+
+    /// An error frame with no advice on retrying.
+    pub fn err(code: i32, msg: impl Into<String>) -> Wire {
+        Wire::Err {
+            code,
+            msg: msg.into(),
+            fate: None,
+            retry_after: None,
         }
     }
 
     /// Turn an `Err` frame into a Rust error.
     pub fn into_result(self) -> Result<Wire> {
         match self {
-            Wire::Err { code, msg } => Err(Error::from_code(code, &msg)),
+            Wire::Err { code, msg, .. } => Err(Error::from_code(code, &msg)),
             w => Ok(w),
         }
     }
@@ -120,6 +163,9 @@ impl Wire {
             Wire::Push { .. } => "push",
             Wire::Ack { .. } => "ack",
             Wire::NeedSync { .. } => "need_sync",
+            Wire::Spend { .. } => "spend",
+            Wire::Spent { .. } => "spent",
+            Wire::AlreadySpent { .. } => "already_spent",
             Wire::Err { .. } => "err",
         }
     }
@@ -175,6 +221,24 @@ pub fn sync_signing_bytes(
     .into_bytes()
 }
 
+/// The bytes a member signs on a `Spend`.
+#[allow(clippy::too_many_arguments)]
+pub fn spend_signing_bytes(
+    room_id: &str,
+    approve_id: &str,
+    action_hash: &str,
+    op_id: &str,
+    spender: &str,
+    node: &str,
+    ts: &str,
+) -> Vec<u8> {
+    diavlos_core::canonical::canonical_json(&serde_json::json!({
+        "spend": 1, "room_id": room_id, "approve_id": approve_id, "action_hash": action_hash,
+        "op_id": op_id, "spender": spender, "node": node, "ts": ts,
+    }))
+    .into_bytes()
+}
+
 /// Write one length-prefixed JSON frame.
 pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, wire: &Wire) -> Result<()> {
     let body = serde_json::to_vec(wire)?;
@@ -217,5 +281,45 @@ mod tests {
         write_frame(&mut a, &w).await.unwrap();
         let back = read_frame(&mut b).await.unwrap();
         assert!(matches!(back, Wire::Sync { have_seq: 7, .. }));
+    }
+
+    /// A frame cut off part way is an I/O error on both sides, which the
+    /// outbox treats as temporary: the message is kept and sent again.
+    #[tokio::test]
+    async fn a_frame_cut_short_is_an_io_error() {
+        // Reading: the length says 100 bytes, 10 arrive, then the stream ends.
+        let (mut a, mut b) = tokio::io::duplex(1024);
+        a.write_all(&100u32.to_be_bytes()).await.unwrap();
+        a.write_all(b"{\"t\":\"hel").await.unwrap();
+        drop(a);
+        assert!(matches!(read_frame(&mut b).await, Err(Error::Io(_))));
+        // Writing: the other end went away.
+        let (mut a, b) = tokio::io::duplex(8);
+        drop(b);
+        let w = Wire::err(1, "x".repeat(64));
+        assert!(matches!(write_frame(&mut a, &w).await, Err(Error::Io(_))));
+        assert_eq!(
+            Error::Io(std::io::Error::other("x")).fate(),
+            Some(Fate::Temporary)
+        );
+    }
+
+    /// An error frame without `fate` (an older helper) still reads, and a
+    /// new one keeps it.
+    #[test]
+    fn error_frames_read_with_and_without_fate() {
+        let old: Wire = serde_json::from_str(r#"{"t":"err","code":6,"msg":"denied: no"}"#).unwrap();
+        assert!(matches!(old, Wire::Err { fate: None, .. }));
+        let e = Error::OverBudget("daily".into(), Some(90));
+        let w: Wire =
+            serde_json::from_str(&serde_json::to_string(&Wire::error(&e)).unwrap()).unwrap();
+        assert!(matches!(
+            w,
+            Wire::Err {
+                fate: Some(Fate::Temporary),
+                retry_after: Some(90),
+                ..
+            }
+        ));
     }
 }
