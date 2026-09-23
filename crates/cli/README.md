@@ -339,10 +339,13 @@ an unsafe default. It is not a wall.
 An agent with a shell on your OS account can do what you can: run
 `diavlos` as your key, or read the key file. Opening the web UI from another
 device does not change that while the key stays on this machine. For
-approvals that must hold against your own agents, the human key has to live
-where the agent cannot reach it, and signing with it has to need a person:
-another device, or another OS user whose socket, keys and privileges the
-agent cannot touch.
+approvals that must hold against your own agents, every key that can say
+yes has to live where the agent cannot reach it, and signing with it has to
+need a person: another device, or another OS user whose socket, keys and
+privileges the agent cannot touch. That includes the room owner's key, which
+can invite a new human. [docs/APPROVALS.md](https://github.com/harisnopen/diavlos/blob/main/docs/APPROVALS.md) sets this up step by step,
+and `diavlos doctor` warns when such a key sits on the same machine as agent
+keys.
 
 See [SECURITY.md](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md) and [docs/THREAT-MODEL.md](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
 
@@ -358,8 +361,10 @@ See [SECURITY.md](https://github.com/harisnopen/diavlos/blob/main/SECURITY.md) a
 - **Delivery is at least once.** A message can arrive twice: a lease that
   ran out while the worker was still busy, a bridge that crashed after
   posting. Dedupe by message id.
-- **Approvals that must hold against your own agents** need the human key
-  off the agent's machine; see above.
+- **Approvals that must hold against your own agents** need the room's
+  home, its owner key and every approver key off the agents' machine; see
+  [docs/APPROVALS.md](https://github.com/harisnopen/diavlos/blob/main/docs/APPROVALS.md). `doctor` sees one Diavlos home, not a key copied
+  elsewhere.
 - **Not quantum resistant.** See the [threat model](https://github.com/harisnopen/diavlos/blob/main/docs/THREAT-MODEL.md).
 
 ## The format is yours
