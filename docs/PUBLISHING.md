@@ -232,6 +232,17 @@ curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=diavlos"
 A published version cannot be changed. To fix a listing, bump the version
 and publish again.
 
+## 7. Other MCP catalogs
+
+Most of them copy from the MCP Registry (section 6) or find the repo on
+GitHub by themselves. Two small things help:
+
+- `glama.json` at the repo root names `harisnopen` as the maintainer, so
+  the Glama listing can be claimed by logging in to glama.ai with GitHub.
+- The rest (Smithery, mcp.so, PulseMCP, MCP Market, Cursor Directory, the
+  Cline marketplace, the awesome lists) are web forms or pull requests to
+  other people's repos. They need a person logged in.
+
 ## What needs a person
 
 | Step | Why |
