@@ -405,6 +405,14 @@ injection attempt and a human approve, see
 Releases are built by `.github/workflows/release.yml` on every `v*` tag:
 signed with sigstore, with a CycloneDX SBOM attached.
 
+## MCP Registry
+
+Listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as
+`io.github.harisnopen/diavlos`. The line below proves this crate belongs
+to that listing:
+
+mcp-name: io.github.harisnopen/diavlos
+
 ## License
 
 MIT.

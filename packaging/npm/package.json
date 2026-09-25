@@ -1,6 +1,7 @@
 {
   "name": "diavlos",
   "version": "2.0.0",
+  "mcpName": "io.github.harisnopen/diavlos",
   "description": "The channel between AI agents. This package downloads the diavlos binary for your platform.",
   "bin": {
     "diavlos": "bin/diavlos.js"

@@ -1,7 +1,7 @@
 # Publishing
 
-Where Diavlos goes and how it gets there. Three package registries and a
-tap. All the names are reserved by publishing, not by asking, so the first
+Where Diavlos goes and how it gets there. Three package registries, a
+tap, and the MCP Registry. All the names are reserved by publishing, not by asking, so the first
 publish is what claims them.
 
 Everything here is ready to run. The only thing missing is a token, and a
@@ -16,8 +16,10 @@ one has to appear in the crates.io index before the next can build:
 diavlos-core  →  diavlos-client  →  diavlos
 ```
 
-Then npm, then the tap. The tap needs a release to exist first, because it
-points at the release's binaries.
+Then npm, then the tap, then the MCP Registry. The tap needs a release to
+exist first, because it points at the release's binaries. The MCP Registry
+goes last, because it checks that the npm and crates.io versions it lists
+are really there.
 
 ## 1. crates.io
 
@@ -186,6 +188,50 @@ https://diavlos.sh is a separate deployment. The docs site built from this
 repo (`site/`, plus `llms.txt` and `llms-full.txt`) publishes to GitHub
 Pages from `.github/workflows/site.yml`.
 
+## 6. The MCP Registry
+
+**Name:** `io.github.harisnopen/diavlos`. The `io.github.harisnopen/`
+part is proved by logging in as the GitHub user `harisnopen`.
+
+https://registry.modelcontextprotocol.io is the official list of MCP
+servers. Other directories (and MCP clients) read from it, so one listing
+here reaches many places. The entry is `server.json` at the repo root. It
+lists both packages, npm and crates.io, and how to start the server
+(`diavlos mcp`).
+
+The registry refuses a package unless the package itself names the
+listing. Both are already in place:
+
+- npm: `"mcpName": "io.github.harisnopen/diavlos"` in
+  `packaging/npm/package.json`;
+- crates.io: the visible line `mcp-name: io.github.harisnopen/diavlos` in
+  `crates/cli/README.md` (it must be plain text: crates.io strips HTML
+  comments).
+
+`crates/cli/tests/publishing.rs` fails the build if either goes missing,
+or if a version in `server.json` drifts from the crate's.
+
+**Publish**, after npm and crates.io carry the new version:
+
+```bash
+# once: get the publisher tool
+brew install mcp-publisher
+# or: download mcp-publisher from
+# https://github.com/modelcontextprotocol/registry/releases
+
+mcp-publisher login github     # opens a browser; log in as harisnopen
+mcp-publisher publish          # reads ./server.json
+```
+
+Check it landed:
+
+```bash
+curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=diavlos"
+```
+
+A published version cannot be changed. To fix a listing, bump the version
+and publish again.
+
 ## What needs a person
 
 | Step | Why |
@@ -193,13 +239,15 @@ Pages from `.github/workflows/site.yml`.
 | crates.io token | Only an account owner can mint one. |
 | Naming the trusted publisher on npm | Only a package owner can set it, and only in the browser. Once. |
 | Making the release tag | Tag deletion and creation are account actions. |
+| `mcp-publisher login github` | Proves the `io.github.harisnopen/` name; it is a browser login. |
 
 Everything else in this file is scripted or generated.
 
 ## Checklist for a release
 
 1. Bump the version everywhere: `Cargo.toml` (workspace), `packaging/npm/package.json`,
-   `bindings/node/package.json`, `bindings/python/pyproject.toml`.
+   `bindings/node/package.json`, `bindings/python/pyproject.toml`, and the
+   three `version` fields in `server.json`.
 2. `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
    `cargo test --workspace`.
 3. Merge to `main`.
@@ -209,7 +257,9 @@ Everything else in this file is scripted or generated.
 5. `cargo publish` the three crates, in order.
 6. The npm workflow publishes the shim by itself, once the release is out.
 7. The tap syncs its formula within the hour, by itself.
-8. Check the three ways in actually work:
+8. `mcp-publisher publish` once `npx diavlos --version` shows the new
+   version (section 6).
+9. Check the three ways in actually work:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
    npx diavlos --version
