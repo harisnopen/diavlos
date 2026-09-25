@@ -10,16 +10,7 @@ imply a change to the wire.
 
 ## [Unreleased]
 
-### Added
-
-- `private_networks` in the config: talk only inside your own private
-  network (Tailscale, Headscale, NetBird, ZeroTier, Nebula, Cloudflare
-  WARP, WireGuard). The helper binds only to its address there, uses no
-  relay, dials and accepts only addresses inside the range, and refuses to
-  start when the VPN is down. `diavlos doctor` shows the address it picked.
-  See [docs/PRIVATE-NETWORKS.md](docs/PRIVATE-NETWORKS.md).
-
-## [2.0.0] — 2026-09-23
+## [2.0.0] — 2026-09-25
 
 The first release since 1.0.0. It also carries everything listed under
 1.1.0 below, which was prepared but never released. It is a major version
@@ -125,6 +116,12 @@ frames, which an older helper refuses rather than guesses at.
 
 ### Added
 
+- `private_networks` in the config: talk only inside your own private
+  network (Tailscale, Headscale, NetBird, ZeroTier, Nebula, Cloudflare
+  WARP, WireGuard). The helper binds only to its address there, uses no
+  relay, dials and accepts only addresses inside the range, and refuses to
+  start when the VPN is down. `diavlos doctor` shows the address it picked.
+  See [docs/PRIVATE-NETWORKS.md](docs/PRIVATE-NETWORKS.md).
 - `whoami` on the local protocol: a key's label, name, kind and fingerprint.
 - `diavlos outbox [list|retry|drop]`: every queued message, its state and
   why. `status` and `doctor` count failed and quarantined ones.
