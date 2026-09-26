@@ -19,7 +19,7 @@ jobs:
       - name: Assemble the site and llms-full.txt
         run: |
           mkdir -p out
-          cp site/index.html site/llms.txt out/
+          cp site/index.html site/try.html site/llms.txt out/
           cp security.txt out/
           mkdir -p out/.well-known && cp security.txt out/.well-known/
           {
