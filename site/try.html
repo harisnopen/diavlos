@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Try Diavlos on two free VMs</title>
+<meta name="description" content="Get two free Linux VMs from Railway with ssh railway.new, no account, and have agents on them talk over Diavlos, with a human approving the risky step.">
+<style>
+  :root { --bg:#fbfbf9; --fg:#1b1b1b; --muted:#666; --line:#e6e6e2; --card:#fff; --accent:#0b5fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#131315; --fg:#ececec; --muted:#9a9a9a; --line:#2a2a2e; --card:#1c1c20; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font: 16px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 36px; margin: 0 0 8px; letter-spacing: -0.02em; }
+  h2 { font-size: 22px; margin: 40px 0 8px; }
+  p.lead { font-size: 19px; color: var(--muted); margin-top: 0; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow: auto; font-size: 14px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  a { color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .card b { display: block; margin-bottom: 4px; }
+  .step { color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; margin: 24px 0 4px; }
+  footer { margin-top: 48px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <p><a href="./">← Diavlos</a></p>
+  <h1>Try it on two free VMs</h1>
+  <p class="lead">Two Linux VMs, no account anywhere. An agent on each. They talk over Diavlos, and nothing risky runs until you say yes.</p>
+
+  <p><a href="https://railway.com/free-vm">Railway</a> gives anyone a VM with <code>ssh railway.new</code>. It knows you by your SSH key, so two keys get you two VMs. Railway allows 3 per IP address per day, and unclaimed VMs are deleted after the claim window.</p>
+
+  <div class="grid">
+    <div class="card"><b>The quick way</b>One script does it all and ends with a signed audit trail. About 2 minutes.</div>
+    <div class="card"><b>By hand</b>Four terminals, a few commands each. You see every step.</div>
+    <div class="card"><b>In GitHub Actions</b>Fork the repo, run the "railway demo" workflow. No secrets needed.</div>
+  </div>
+
+  <h2>The quick way</h2>
+  <p>You need <code>ssh</code>, Python 3 and <code>diavlos</code>:</p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
+git clone https://github.com/harisnopen/diavlos
+cd diavlos/examples/railway-vms
+python run.py            # you approve at the prompt
+python run.py --deny     # you say no, and the job never runs</code></pre>
+  <p>The planner on VM A sends the runner on VM B a signed task. The runner asks you first, with the exact command. You answer on your own machine, with your own key. Then a gate on VM B checks your answer and spends it, and only then runs the job. See the <a href="https://github.com/harisnopen/diavlos/tree/main/examples/railway-vms">example's README</a> for what it does line by line.</p>
+  <p>No Railway handy? <code>python run.py --fake</code> runs the same thing with two local folders standing in for the VMs.</p>
+
+  <h2>By hand</h2>
+  <p class="step">1 · Your laptop: make a room and two invites</p>
+  <pre><code>diavlos new demo
+diavlos invite demo alice     # copy the dv1... line
+diavlos invite demo bob       # copy this one too</code></pre>
+
+  <p class="step">2 · Terminal A: the first VM</p>
+  <pre><code>ssh-keygen -t ed25519 -f ~/.ssh/railway-a -N ""
+ssh -i ~/.ssh/railway-a railway.new
+
+# now on the VM:
+curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+diavlos --as alice join dv1...          # alice's invite
+diavlos --as alice send demo "please run the report" --type task</code></pre>
+
+  <p class="step">3 · Terminal B: the second VM, with its own key</p>
+  <pre><code>ssh-keygen -t ed25519 -f ~/.ssh/railway-b -N ""
+ssh -i ~/.ssh/railway-b railway.new
+
+# now on the VM:
+curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+diavlos --as bob join dv1...            # bob's invite
+diavlos --as bob next demo              # alice (task): please run the report
+diavlos --as bob ask demo "Run the report on this VM?" \
+  --action '{"verb":"exec","target":"vm-b","params":{"cmd":"./report.sh"}}'</code></pre>
+
+  <p class="step">4 · Your laptop: you are the human</p>
+  <pre><code>diavlos read demo                       # see the question and its id
+diavlos send demo --type approve --reply-to &lt;question id&gt;</code></pre>
+  <p>Bob's <code>ask</code> returns with your approve. A script on VM B would now run <code>diavlos --as bob check-approve demo '&lt;the same action&gt;'</code> before doing the deed. That check passes once, only for that exact action, and only for ten minutes.</p>
+
+  <h2>What to look for</h2>
+  <div class="grid">
+    <div class="card"><b>No open ports</b>Neither VM listens on the internet. The helpers meet through relays over HTTPS.</div>
+    <div class="card"><b>Real names</b>Every message is signed. <code>diavlos who demo</code> shows each key's fingerprint.</div>
+    <div class="card"><b>Nothing lost</b>Close terminal B, send from A, open B again: the message is waiting.</div>
+    <div class="card"><b>Proof</b><code>diavlos export demo &gt; run.jsonl</code> then <code>diavlos verify run.jsonl</code> on any machine.</div>
+  </div>
+
+  <h2>Keep your VMs yours</h2>
+  <p>Railway's welcome message has a claim link. Anyone with it can take the VM, so don't paste it anywhere public. The script never prints it.</p>
+
+  <footer>MIT. Zero telemetry. <a href="https://github.com/harisnopen/diavlos">Source on GitHub</a>. Railway and its free VMs are Railway's; Diavlos works on any VM.</footer>
+</main>
+</body>
+</html>

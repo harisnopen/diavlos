@@ -1,0 +1,46 @@
+name: railway demo
+
+# Runs examples/railway-vms for real: two free Railway VMs from
+# `ssh railway.new`, one room made on this runner. No account and no
+# secret: Railway knows each VM by an SSH key made fresh for the run.
+# Railway allows 3 free VMs per IP address per day and one run uses 2, so
+# it only runs when started by hand, never on a push or pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      decision:
+        description: "What the human says at the gate"
+        type: choice
+        options: [approve, deny]
+        default: approve
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-demo
+  cancel-in-progress: false
+
+jobs:
+  railway:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Build diavlos
+        run: |
+          cargo build --release -p diavlos
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+      - name: Two Railway VMs, one room
+        working-directory: examples/railway-vms
+        env:
+          DIAVLOS_HOME: /tmp/dvh
+          DECISION: ${{ inputs.decision }}
+        run: |
+          mkdir -p "$DIAVLOS_HOME"
+          if [ "$DECISION" = deny ]; then flag=--deny; else flag=--auto-approve; fi
+          python3 -u run.py "$flag"
