@@ -13,7 +13,11 @@ use std::time::{Duration, Instant};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-const SECRET: &str = "wake-test-secret";
+/// A signing secret made fresh for each test run.
+fn secret() -> &'static str {
+    static S: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    S.get_or_init(|| format!("{:032x}", rand::random::<u128>()))
+}
 
 struct Home {
     dir: PathBuf,
@@ -41,7 +45,7 @@ impl Home {
             .env("DIAVLOS_WAKE_SCALE_MS", self.scale_ms.to_string())
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
-            .env("WAKE_SECRET", SECRET)
+            .env("WAKE_SECRET", secret())
             .args(args)
             .output()
             .expect("run diavlos")
@@ -176,7 +180,7 @@ impl Receiver {
 }
 
 fn verify(hit: &Hit) -> serde_json::Value {
-    let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret().as_bytes()).unwrap();
     mac.update(hit.body.as_bytes());
     let want = format!(
         "sha256={}",
@@ -258,7 +262,7 @@ fn ten_messages_in_a_burst_are_one_signed_nudge_and_are_still_there() {
         "{events}"
     );
     assert!(
-        !events.contains(SECRET) && !events.contains("/wake"),
+        !events.contains(secret()) && !events.contains("/wake"),
         "{events}"
     );
 }

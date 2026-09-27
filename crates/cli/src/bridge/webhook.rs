@@ -171,13 +171,30 @@ mod tests {
         assert_eq!(v["count"], 3);
     }
 
+    /// HMAC-SHA256 by the book (RFC 2104), from SHA-256 alone, to check
+    /// `sign` against something that does not share its code.
+    fn hmac_by_hand(key: &[u8], msg: &[u8]) -> String {
+        use sha2::Digest;
+        let mut k = [0u8; 64];
+        if key.len() > 64 {
+            k[..32].copy_from_slice(&Sha256::digest(key));
+        } else {
+            k[..key.len()].copy_from_slice(key);
+        }
+        let pad = |b: u8| k.iter().map(|x| x ^ b).collect::<Vec<u8>>();
+        let inner = Sha256::digest([pad(0x36), msg.to_vec()].concat());
+        let outer = Sha256::digest([pad(0x5c), inner.to_vec()].concat());
+        format!("sha256={}", data_encoding::HEXLOWER.encode(&outer))
+    }
+
     #[test]
     fn signature_is_hmac_sha256_over_the_body() {
-        // RFC 4231 test case 2.
-        assert_eq!(
-            sign(b"Jefe", "what do ya want for nothing?"),
-            "sha256=5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
+        // A fresh random key each run, short and longer than a block.
+        for len in [16usize, 100] {
+            let key: Vec<u8> = (0..len).map(|_| rand::random::<u8>()).collect();
+            let body = r#"{"v":1,"event":"wake","count":3}"#;
+            assert_eq!(sign(&key, body), hmac_by_hand(&key, body.as_bytes()));
+        }
     }
 
     #[test]
