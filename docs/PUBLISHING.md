@@ -26,7 +26,24 @@ are really there.
 **Names:** `diavlos`, `diavlos-core`, `diavlos-client`. All three were free
 as of 2026-09-21. Publishing claims them.
 
-Get a token once, at https://crates.io/settings/tokens. Scope it to
+**From the browser** (no token, no computer): once the release build for
+a tag is done, run Actions → **publish** → Run workflow, with the tag. It
+publishes the three crates in order, skipping any already there, then
+publishes `server.json` to the MCP Registry (step 6). It uses trusted
+publishing, so each crate needs this once, on crates.io, at
+`https://crates.io/crates/<crate>/settings` → Trusted Publishing → Add:
+
+| Field | Value |
+|---|---|
+| Publisher | GitHub |
+| Repository owner | `harisnopen` |
+| Repository name | `diavlos` |
+| Workflow filename | `publish.yml` |
+| Environment | *(blank)* |
+
+Do it for `diavlos-core`, `diavlos-client` and `diavlos`.
+
+**By hand**, get a token once, at https://crates.io/settings/tokens. Scope it to
 "publish-new" and "publish-update". Then:
 
 ```bash
@@ -196,8 +213,14 @@ part is proved by logging in as the GitHub user `harisnopen`.
 https://registry.modelcontextprotocol.io is the official list of MCP
 servers. Other directories (and MCP clients) read from it, so one listing
 here reaches many places. The entry is `server.json` at the repo root. It
-lists both packages, npm and crates.io, and how to start the server
-(`diavlos mcp`).
+lists the crates.io package and how to start the server (`diavlos mcp`).
+
+npm is out of the listing for now: the npm account needs its security key
+to set up trusted publishing, so npm still carries 1.0.0 and the registry
+would refuse a listing that names npm 2.1.0. When npm has the current
+version again, put the npm package back in `server.json` (the same block
+as the cargo one, with `"registryType": "npm"`, `"registryBaseUrl":
+"https://registry.npmjs.org"` and `"runtimeHint": "npx"`).
 
 The registry refuses a package unless the package itself names the
 listing. Both are already in place:
@@ -211,7 +234,7 @@ listing. Both are already in place:
 `crates/cli/tests/publishing.rs` fails the build if either goes missing,
 or if a version in `server.json` drifts from the crate's.
 
-**Publish**, after npm and crates.io carry the new version:
+**Publish**, after every package it lists carries the new version:
 
 ```bash
 # once: get the publisher tool
@@ -222,6 +245,10 @@ brew install mcp-publisher
 mcp-publisher login github     # opens a browser; log in as harisnopen
 mcp-publisher publish          # reads ./server.json
 ```
+
+Or let the **publish** workflow do it (see step 1): it logs in with
+`mcp-publisher login github-oidc`, which needs nothing set up, and uses
+`server.json` from `main`.
 
 Check it landed:
 
