@@ -10,6 +10,26 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-09-27
+
+Files on messages, waking agents that are not running, and chains of work
+that stop before they go round in circles. Nothing here changes the message
+format (`v` is still 1). The peer protocol gains file frames, and a helper
+now says in its hello what it can do, so a new helper never sends file
+frames to an older home.
+
+### Upgrading from 2.0
+
+1. Upgrade the machine that is each room's home first. Members on 2.1 can
+   send files only to a home on 2.1; an older home is named in the error.
+2. Run `diavlos stop` once on each machine, so the helper restarts as the
+   new version.
+3. A task that hands work back to someone already in its chain is now
+   refused, and a chain stops after 4 hand-offs. Set `max_task_hops = 0`
+   in a room's `policy.toml` to turn that off.
+4. Files are on in every room except `confidential` and `pii` ones. Set
+   `files = "off"` (or `"safe"`) in a room's `policy.toml` to change that.
+
 ### Added
 
 - Files on messages: `diavlos send <room> "text" --file <path>` (more than
@@ -311,6 +331,7 @@ bundle, plus a CycloneDX SBOM.
   services. `doctor` for support tickets, `/metrics` on localhost for
   Prometheus, zero telemetry.
 
-[Unreleased]: https://github.com/harisnopen/diavlos/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/harisnopen/diavlos/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/harisnopen/diavlos/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/harisnopen/diavlos/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/harisnopen/diavlos/releases/tag/v1.0.0
