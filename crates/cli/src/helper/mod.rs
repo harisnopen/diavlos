@@ -6,6 +6,7 @@
 //! message its place in the chain. For rooms joined from elsewhere, this
 //! helper keeps a link to the room's home and syncs what it missed.
 
+mod files;
 mod local;
 mod outbox;
 mod peers;
@@ -79,6 +80,8 @@ pub struct Helper {
     /// The diavlos version each peer helper said it runs, by node id, from
     /// its hello. For `who`.
     pub node_versions: std::sync::Mutex<HashMap<String, String>>,
+    /// What each peer helper said it can do (`files`, …), from its hello.
+    pub node_features: std::sync::Mutex<HashMap<String, Vec<String>>>,
     /// One task per wake rule, by rule id.
     wake_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
@@ -119,6 +122,23 @@ impl Helper {
         if let Ok(mut m) = self.node_versions.lock() {
             m.insert(node.to_string(), version.to_string());
         }
+    }
+
+    /// Remember what a peer helper said it can do.
+    pub fn saw_features(&self, node: &str, features: &[String]) {
+        if let Ok(mut f) = self.node_features.lock() {
+            f.insert(node.to_string(), features.to_vec());
+        }
+    }
+
+    /// Did this peer say it can do `feature`? This helper always can.
+    pub fn node_has(&self, node: &str, feature: &str) -> bool {
+        node == self.net.node_id()
+            || self
+                .node_features
+                .lock()
+                .map(|f| f.get(node).is_some_and(|v| v.iter().any(|x| x == feature)))
+                .unwrap_or(false)
     }
 
     fn notify_room(&self, room_id: &str, seq: u64) {
@@ -311,7 +331,7 @@ impl Helper {
         room.home_node == self.net.node_id()
     }
 
-    fn policy(&self, room: &Room) -> Policy {
+    pub(crate) fn policy(&self, room: &Room) -> Policy {
         Policy::load(&self.paths.policy(&room.name)).unwrap_or_default()
     }
 
@@ -462,6 +482,7 @@ impl Helper {
         let policy = self.policy(room);
         self.policy_hook.check(&policy, &msg)?;
         self.check_task_chain(room, &msg, policy.max_task_hops)?;
+        files::check_message(self, room, &policy, &msg)?;
         let alert = self
             .store
             .check_limits(&room.id, &msg.from, &self.config.limits)?;
@@ -976,6 +997,7 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         clock_skew: Default::default(),
         http: crate::bridge::webhook::client(),
         node_versions: std::sync::Mutex::new(HashMap::new()),
+        node_features: std::sync::Mutex::new(HashMap::new()),
         wake_tasks: Mutex::new(HashMap::new()),
     });
     helper.emit(
@@ -1040,6 +1062,9 @@ async fn retention_loop(helper: Arc<Helper>) {
             continue;
         };
         for room in rooms {
+            if let Err(e) = files::sweep(&helper, &room) {
+                warn!(room = %room.id, error = %e, "file sweep failed");
+            }
             let Some(days) = room.retention_days else {
                 continue;
             };

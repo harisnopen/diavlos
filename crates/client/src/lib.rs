@@ -25,7 +25,7 @@ pub mod proto;
 pub use client::Client;
 pub use paths::Paths;
 
-use diavlos_core::{Message, MessageType, Result};
+use diavlos_core::{Error, Message, MessageType, Result};
 use proto::{
     DraftWire, JoinResult, NextResult, ReadResult, Request, RoomStatus, SendResult, WhoEntry,
 };
@@ -39,6 +39,8 @@ pub struct SendOptions {
     pub trace: Option<String>,
     pub data: serde_json::Value,
     pub action: Option<diavlos_core::Action>,
+    /// Files to send with it, as paths on this machine.
+    pub files: Vec<std::path::PathBuf>,
 }
 
 impl SendOptions {
@@ -97,6 +99,20 @@ impl Room {
     }
 
     /// A room you are already in.
+    /// Fetch a file (by id, or every file on a message) and save it under
+    /// the helper's `files/<room>/` folder.
+    pub async fn get_file(&self, id: &str) -> Result<Vec<proto::SavedFile>> {
+        let v = self
+            .client
+            .call(&Request::GetFile {
+                room: self.room.clone(),
+                identity: self.identity.clone(),
+                id: id.to_string(),
+            })
+            .await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
     pub fn open(paths: &Paths, room: &str, identity: &str) -> Room {
         Room {
             client: Client::new(paths.clone()),
@@ -121,6 +137,7 @@ impl Room {
                     data: opts.data,
                     class: None,
                     action: opts.action,
+                    files: absolute(&opts.files)?,
                 },
             })
             .await?;
@@ -285,4 +302,17 @@ impl Room {
 pub async fn rooms(paths: &Paths) -> Result<Vec<RoomStatus>> {
     let v = Client::new(paths.clone()).call(&Request::Rooms).await?;
     Ok(serde_json::from_value(v)?)
+}
+
+/// Paths as the helper needs them: full paths, since it does not share
+/// this process's working folder.
+pub fn absolute(paths: &[std::path::PathBuf]) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|p| {
+            std::path::absolute(p)
+                .map(|p| p.to_string_lossy().to_string())
+                .map_err(|e| Error::Invalid(format!("{}: {e}", p.display())))
+        })
+        .collect()
 }

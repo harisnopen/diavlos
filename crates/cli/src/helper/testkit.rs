@@ -252,6 +252,7 @@ pub fn helper(node: &str, home: &TempHome, config: Option<Config>) -> Arc<Helper
         clock_skew: Default::default(),
         http: reqwest::Client::new(),
         node_versions: std::sync::Mutex::new(HashMap::new()),
+        node_features: std::sync::Mutex::new(HashMap::new()),
         wake_tasks: Mutex::new(HashMap::new()),
     })
 }

@@ -112,6 +112,19 @@ enum Cmd {
         /// public, internal, confidential, pii
         #[arg(long)]
         class: Option<DataClass>,
+        /// A file to send with it. Give it more than once for more files.
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch a file from the room and save it under ~/.diavlos/files/<room>/.
+    /// Give a file id (sha256:…, or its first 12+ hex digits) or a message
+    /// id for every file on that message. Prints where it went and any
+    /// warning to read before opening it.
+    Get {
+        room: String,
+        id: String,
         #[arg(long)]
         json: bool,
     },
@@ -771,10 +784,12 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             trace,
             data,
             class,
+            files,
             json,
         } => {
             let text = match text {
                 Some(t) => t,
+                None if !files.is_empty() => String::new(),
                 None => {
                     let mut s = String::new();
                     std::io::stdin().read_to_string(&mut s)?;
@@ -810,6 +825,7 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                         data,
                         class,
                         action: None,
+                        files: diavlos_client::absolute(&files)?,
                     },
                 },
             };
@@ -819,11 +835,41 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
                 println!("{}", serde_json::to_string(&r.message)?);
             } else if r.delivered {
                 println!("sent {} (seq {})", r.message.id, r.message.seq);
+            } else if !files.is_empty() {
+                println!(
+                    "queued {} (its files are still on the way to the room's home; it goes when they are there)",
+                    r.message.id
+                );
             } else {
                 println!(
                     "queued {} (the room's home is offline; it will go when it is back)",
                     r.message.id
                 );
+            }
+            if !json {
+                for f in diavlos_core::files::refs(&r.message.data).unwrap_or_default() {
+                    println!("    file {} {} ({} bytes)", f.id, f.name, f.size);
+                }
+            }
+            Ok(0)
+        }
+        Cmd::Get { room, id, json } => {
+            let v = client
+                .call(&Request::GetFile { room, identity, id })
+                .await?;
+            let saved: Vec<diavlos_client::proto::SavedFile> = serde_json::from_value(v)?;
+            if json {
+                println!("{}", serde_json::to_string(&saved)?);
+                return Ok(0);
+            }
+            for f in &saved {
+                println!(
+                    "saved {} ({} bytes, {}, from {})",
+                    f.path, f.size, f.kind, f.from
+                );
+                for w in &f.warnings {
+                    println!("    warning: {w}");
+                }
             }
             Ok(0)
         }
@@ -1839,6 +1885,12 @@ fn print_message(m: &Message, json: bool) -> Result<(), Error> {
         println!("{head}: (content removed)");
     } else {
         println!("{head}: {}", m.text);
+        for f in diavlos_core::files::refs(&m.data).unwrap_or_default() {
+            println!(
+                "    file {} {} ({} bytes) - diavlos get to fetch it",
+                f.id, f.name, f.size
+            );
+        }
         // What an approve would sign, and the id to answer with: the text
         // is only what the asker says it is.
         if let Some(a) = &m.action {

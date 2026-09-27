@@ -13,6 +13,7 @@ pub mod canonical;
 pub mod control;
 pub mod error;
 pub mod faults;
+pub mod files;
 pub mod invite;
 pub mod keys;
 pub mod limits;
@@ -29,11 +30,11 @@ pub use invite::{Invite, InviteSpec};
 pub use keys::{Identity, Kind, Profile, PublicKey, SignedProfile, Signer};
 pub use limits::Limits;
 pub use message::{Action, AgentInfo, DataClass, Draft, Message, MessageType};
-pub use policy::{DefaultHook, Policy, PolicyHook};
+pub use policy::{DefaultHook, FileMode, Policy, PolicyHook};
 pub use room::{Member, Role, Room};
 pub use store::{
-    Delivery, DeliveryState, LocalMember, OutboxCounts, OutboxEntry, OutboxState, Settle,
-    SpendOutcome, SpendRecord, SpendRequest, Store, WakePending,
+    Delivery, DeliveryState, FileRefRow, LocalMember, OutboxCounts, OutboxEntry, OutboxState,
+    Settle, SpendOutcome, SpendRecord, SpendRequest, Store, StoredFile, WakePending,
 };
 
 /// Version of this crate, for the version handshake.

@@ -194,6 +194,43 @@ const MIGRATIONS: &[M<'static>] = &[
     );
     "#,
     ),
+    // Files on messages. `file_refs` is every helper's index of which
+    // message points at which file (content may be encrypted, so it cannot
+    // be searched). `files` and `file_fetches` are the home's: the bytes it
+    // keeps for a room and who has fetched them.
+    M::up(
+        r#"
+    CREATE TABLE file_refs (
+      msg_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      room_id TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      name TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      type TEXT NOT NULL DEFAULT '',
+      from_name TEXT NOT NULL,
+      to_name TEXT,
+      PRIMARY KEY (msg_id, hash)
+    );
+    CREATE INDEX file_refs_hash ON file_refs(room_id, hash);
+    CREATE TABLE files (
+      room_id TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      uploader TEXT NOT NULL,
+      created TEXT NOT NULL,
+      PRIMARY KEY (room_id, hash)
+    );
+    CREATE INDEX files_uploader ON files(room_id, uploader, created);
+    CREATE TABLE file_fetches (
+      room_id TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      member TEXT NOT NULL,
+      at TEXT NOT NULL,
+      PRIMARY KEY (room_id, hash, member)
+    );
+    "#,
+    ),
 ];
 
 /// How many legacy outbox rows are sealed per transaction.
@@ -1006,6 +1043,15 @@ impl Store {
                 "INSERT INTO contents (msg_id, body, deleted) VALUES (?1, ?2, 0)",
                 params![msg.id, self.seal(&serde_json::to_string(&msg.content())?)?],
             )?;
+            // The home refused bad references before sequencing; anything
+            // odd that still arrives is simply not indexed.
+            for f in crate::files::refs(&msg.data).unwrap_or_default() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO file_refs (msg_id, room_id, hash, name, size, type, from_name, to_name)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![msg.id, msg.room, f.id, f.name, f.size as i64, f.mime, msg.from, msg.to],
+                )?;
+            }
         }
         // In the chain means delivered: it leaves the outbox in the same
         // transaction, whichever way it came back (answer, push or sync).
@@ -1479,6 +1525,10 @@ impl Store {
              WHERE deleted=0 AND msg_id IN (SELECT id FROM messages WHERE room_id=?1 AND ts<?2)",
             params![room_id, cutoff],
         )?;
+        conn.execute(
+            "DELETE FROM file_refs WHERE msg_id IN (SELECT id FROM messages WHERE room_id=?1 AND ts<?2)",
+            params![room_id, cutoff],
+        )?;
         Ok(n as u64)
     }
 
@@ -1489,6 +1539,7 @@ impl Store {
             "UPDATE contents SET body='', deleted=1 WHERE msg_id=?1 AND deleted=0",
             params![msg_id],
         )?;
+        conn.execute("DELETE FROM file_refs WHERE msg_id=?1", params![msg_id])?;
         Ok(n == 1)
     }
 
@@ -2374,6 +2425,238 @@ impl Store {
     }
 }
 
+/// A file the home keeps for a room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFile {
+    pub room_id: String,
+    pub hash: String,
+    pub size: u64,
+    pub kind: String,
+    pub uploader: String,
+    pub created: String,
+}
+
+/// A message that points at a file, as this helper knows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRefRow {
+    pub msg_id: String,
+    pub room_id: String,
+    pub file: crate::files::FileRef,
+    pub from: String,
+    pub to: Option<String>,
+}
+
+/// How long a file no message points at is kept (an upload whose message
+/// never went in).
+pub const ORPHAN_FILE_SECS: i64 = 24 * 3600;
+
+impl Store {
+    // ---- files ---------------------------------------------------------
+
+    fn row_to_ref(r: &Row) -> rusqlite::Result<FileRefRow> {
+        Ok(FileRefRow {
+            msg_id: r.get("msg_id")?,
+            room_id: r.get("room_id")?,
+            file: crate::files::FileRef {
+                id: r.get("hash")?,
+                name: r.get("name")?,
+                size: r.get::<_, i64>("size")? as u64,
+                mime: r.get("type")?,
+            },
+            from: r.get("from_name")?,
+            to: r.get("to_name")?,
+        })
+    }
+
+    /// The messages in a room that point at this file, oldest first.
+    pub fn file_refs(&self, room_id: &str, hash: &str) -> Result<Vec<FileRefRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT f.* FROM file_refs f JOIN messages m ON m.id = f.msg_id
+             WHERE f.room_id=?1 AND f.hash=?2 ORDER BY m.seq",
+        )?;
+        let rows = stmt.query_map(params![room_id, hash], Self::row_to_ref)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The messages in a room that point at a file whose id starts with
+    /// `prefix`, oldest first.
+    pub fn file_refs_like(&self, room_id: &str, prefix: &str) -> Result<Vec<FileRefRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT f.* FROM file_refs f JOIN messages m ON m.id = f.msg_id
+             WHERE f.room_id=?1 AND substr(f.hash, 1, length(?2))=?2 ORDER BY f.hash, m.seq",
+        )?;
+        let rows = stmt.query_map(params![room_id, prefix], Self::row_to_ref)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The files one message points at, in the order it lists them.
+    pub fn file_refs_of(&self, msg_id: &str) -> Result<Vec<FileRefRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT * FROM file_refs WHERE msg_id=?1 ORDER BY rowid")?;
+        let rows = stmt.query_map(params![msg_id], Self::row_to_ref)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn row_to_file(r: &Row) -> rusqlite::Result<StoredFile> {
+        Ok(StoredFile {
+            room_id: r.get("room_id")?,
+            hash: r.get("hash")?,
+            size: r.get::<_, i64>("size")? as u64,
+            kind: r.get("kind")?,
+            uploader: r.get("uploader")?,
+            created: r.get("created")?,
+        })
+    }
+
+    /// Home side: a file this helper keeps for the room, if it has it.
+    pub fn file_stored(&self, room_id: &str, hash: &str) -> Result<Option<StoredFile>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT * FROM files WHERE room_id=?1 AND hash=?2",
+                params![room_id, hash],
+                Self::row_to_file,
+            )
+            .optional()?)
+    }
+
+    /// Home side: every file kept for a room.
+    pub fn files_stored(&self, room_id: &str) -> Result<Vec<StoredFile>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT * FROM files WHERE room_id=?1 ORDER BY created")?;
+        let rows = stmt.query_map(params![room_id], Self::row_to_file)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Home side: record a file whose bytes are now in place. False if it
+    /// was there already.
+    pub fn file_add(&self, f: &StoredFile) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO files (room_id, hash, size, kind, uploader, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                f.room_id,
+                f.hash,
+                f.size as i64,
+                f.kind,
+                f.uploader,
+                f.created
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Home side: bytes kept for a room, and bytes one member uploaded
+    /// since `since`.
+    pub fn file_bytes(&self, room_id: &str, uploader: &str, since: &str) -> Result<(u64, u64)> {
+        let conn = self.lock();
+        let room: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM files WHERE room_id=?1",
+            params![room_id],
+            |r| r.get(0),
+        )?;
+        let mine: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM files WHERE room_id=?1 AND uploader=?2 AND created>=?3",
+            params![room_id, uploader, since],
+            |r| r.get(0),
+        )?;
+        Ok((room as u64, mine as u64))
+    }
+
+    /// Home side: this member has the whole file now.
+    pub fn file_fetched(&self, room_id: &str, hash: &str, member: &str, now: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO file_fetches (room_id, hash, member, at) VALUES (?1, ?2, ?3, ?4)",
+            params![room_id, hash, member, now],
+        )?;
+        Ok(())
+    }
+
+    /// Home side: the files of a room that are due to go, taken out of the
+    /// store's records. The caller removes the bytes. Due: older than
+    /// `max_days`; pointed at by no message for a day; or fetched by
+    /// everyone it was for, `keep_days` ago. "Everyone" is the `to` member
+    /// of each message that points at it, or every member but the sender
+    /// when a message names nobody.
+    pub fn file_sweep(
+        &self,
+        room_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        keep_days: u64,
+        max_days: u64,
+    ) -> Result<Vec<String>> {
+        let ts =
+            |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let days = |d: u64| chrono::Duration::days(d.min(100_000) as i64);
+        let too_old = ts(now - days(max_days));
+        let orphan = ts(now - chrono::Duration::seconds(ORPHAN_FILE_SECS));
+        let settled = ts(now - days(keep_days));
+        let members: Vec<String> = self
+            .members(room_id)?
+            .into_iter()
+            .filter(|m| !m.revoked)
+            .map(|m| m.name)
+            .collect();
+        let mut due = Vec::new();
+        for f in self.files_stored(room_id)? {
+            let refs = self.file_refs(room_id, &f.hash)?;
+            let go = if f.created < too_old {
+                true
+            } else if refs.is_empty() {
+                f.created < orphan
+            } else {
+                let mut audience: Vec<String> = Vec::new();
+                for r in &refs {
+                    match &r.to {
+                        Some(to) => audience.push(to.clone()),
+                        None => audience.extend(members.iter().filter(|m| **m != r.from).cloned()),
+                    }
+                }
+                audience.sort();
+                audience.dedup();
+                let fetched: HashMap<String, String> = {
+                    let conn = self.lock();
+                    let mut stmt = conn.prepare(
+                        "SELECT member, at FROM file_fetches WHERE room_id=?1 AND hash=?2",
+                    )?;
+                    let rows = stmt.query_map(params![room_id, f.hash], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })?;
+                    rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
+                };
+                let mut last = f.created.clone();
+                let mut all = true;
+                for who in &audience {
+                    match fetched.get(who) {
+                        Some(at) => last = last.max(at.clone()),
+                        None => all = false,
+                    }
+                }
+                all && last < settled
+            };
+            if go {
+                due.push(f.hash);
+            }
+        }
+        let conn = self.lock();
+        for h in &due {
+            conn.execute(
+                "DELETE FROM files WHERE room_id=?1 AND hash=?2",
+                params![room_id, h],
+            )?;
+            conn.execute(
+                "DELETE FROM file_fetches WHERE room_id=?1 AND hash=?2",
+                params![room_id, h],
+            )?;
+        }
+        Ok(due)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3216,5 +3499,102 @@ mod tests {
             SpendOutcome::SpentByAnother
         );
         assert_eq!(s.message_count("r_test").unwrap(), before + 1);
+    }
+    #[test]
+    fn files_are_indexed_kept_and_swept() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let bot = Identity::generate("bot", Kind::Agent);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        for (name, id) in [("haris", &owner), ("bot", &bot)] {
+            s.upsert_member(
+                &Member {
+                    room_id: "r_test".into(),
+                    name: name.into(),
+                    key: id.public(),
+                    kind: Kind::Agent,
+                    role: Role::TaskGiver,
+                    node: None,
+                    granted_by: owner.public(),
+                    expires_at: None,
+                    joined_at: T0.into(),
+                    last_seen: None,
+                    muted: false,
+                    revoked: false,
+                    profile: serde_json::Value::Null,
+                },
+                None,
+            )
+            .unwrap();
+        }
+        let hash = format!("sha256:{}", "a".repeat(64));
+        let orphan = format!("sha256:{}", "b".repeat(64));
+        let mut m = Message::new(
+            Draft {
+                room: "r_test".into(),
+                from: "haris".into(),
+                text: "log".into(),
+                kind: Some(MessageType::Chat),
+                data: serde_json::json!({"files": [{"id": hash, "name": "a.log", "size": 3, "type": "text/plain"}]}),
+                ..Default::default()
+            },
+            &owner,
+        )
+        .unwrap();
+        assert!(s.sequence_and_append(&mut m).unwrap());
+        let refs = s.file_refs("r_test", &hash).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].file.name, "a.log");
+        assert_eq!(s.file_refs_of(&m.id).unwrap()[0].from, "haris");
+
+        let day0 = chrono::DateTime::parse_from_rfc3339(T0)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let at = |d: i64| day0 + chrono::Duration::days(d);
+        let ts = |d: i64| at(d).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        for h in [&hash, &orphan] {
+            s.file_add(&StoredFile {
+                room_id: "r_test".into(),
+                hash: h.clone(),
+                size: 3,
+                kind: "text".into(),
+                uploader: "haris".into(),
+                created: ts(0),
+            })
+            .unwrap();
+        }
+        assert_eq!(s.file_bytes("r_test", "haris", &ts(0)).unwrap(), (6, 6));
+        assert_eq!(s.file_bytes("r_test", "bot", &ts(0)).unwrap(), (6, 0));
+        // A day on: the orphan goes; the other waits for bot.
+        assert_eq!(
+            s.file_sweep("r_test", at(2), 7, 30).unwrap(),
+            vec![orphan.clone()]
+        );
+        assert!(s.file_sweep("r_test", at(20), 7, 30).unwrap().is_empty());
+        // bot fetches on day 20: kept 7 more days, then gone.
+        s.file_fetched("r_test", &hash, "bot", &ts(20)).unwrap();
+        assert!(s.file_sweep("r_test", at(26), 7, 30).unwrap().is_empty());
+        assert_eq!(
+            s.file_sweep("r_test", at(28), 7, 30).unwrap(),
+            vec![hash.clone()]
+        );
+        assert!(s.file_stored("r_test", &hash).unwrap().is_none());
+
+        // Never past max_days, fetched or not; and a tombstone drops the refs.
+        s.file_add(&StoredFile {
+            room_id: "r_test".into(),
+            hash: hash.clone(),
+            size: 3,
+            kind: "text".into(),
+            uploader: "haris".into(),
+            created: ts(0),
+        })
+        .unwrap();
+        assert_eq!(
+            s.file_sweep("r_test", at(31), 7, 30).unwrap(),
+            vec![hash.clone()]
+        );
+        assert!(s.tombstone_message(&m.id).unwrap());
+        assert!(s.file_refs("r_test", &hash).unwrap().is_empty());
     }
 }

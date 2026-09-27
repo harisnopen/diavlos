@@ -20,6 +20,11 @@ pub const ALPN: &[u8] = b"diavlos/1";
 /// Largest frame we read. A message is capped at 64 KiB; a sync batch of
 /// 500 messages fits well inside this.
 pub const MAX_FRAME: usize = 48 * 1024 * 1024;
+/// What this helper says it can do, in its hello.
+pub fn features() -> Vec<String> {
+    vec!["files".into()]
+}
+
 /// Messages per sync batch.
 pub const SYNC_BATCH: u32 = 500;
 
@@ -36,6 +41,10 @@ pub enum Wire {
     HelloOk {
         v: u32,
         version: String,
+        /// What this helper can do beyond the base protocol. An older
+        /// helper sends none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     /// Join a room with a signed invite. The joiner presents its signed
     /// profile and how it can be reached.
@@ -108,6 +117,49 @@ pub enum Wire {
     AlreadySpent {
         approve_id: String,
     },
+    /// A member asks the room's home how much of a file it holds, before
+    /// sending it. The home runs its checks (files allowed, size, quotas)
+    /// here, so a file it would refuse is not sent at all. Signed like
+    /// every file request (see [`file_signing_bytes`]).
+    FileAsk {
+        room_id: String,
+        name: String,
+        file: String,
+        size: u64,
+        ts: String,
+        sig: String,
+    },
+    /// One piece of a file, base64, starting at `offset`.
+    FilePut {
+        room_id: String,
+        name: String,
+        file: String,
+        size: u64,
+        offset: u64,
+        data: String,
+        ts: String,
+        sig: String,
+    },
+    /// How many bytes of the file the home holds; `done` once it has all
+    /// of them and they match the fingerprint.
+    FileStored {
+        have: u64,
+        done: bool,
+    },
+    /// A member asks the home for a piece of a file a message points at.
+    FileGet {
+        room_id: String,
+        name: String,
+        file: String,
+        offset: u64,
+        ts: String,
+        sig: String,
+    },
+    /// A piece of a file, base64, and the whole file's size.
+    FileChunk {
+        data: String,
+        size: u64,
+    },
     /// A refusal or failure. `fate` says whether the sender should keep
     /// the message and try again (temporary) or stop (definitive); an old
     /// helper leaves it out, and the sender then goes by `code`.
@@ -167,6 +219,11 @@ impl Wire {
             Wire::Spend { .. } => "spend",
             Wire::Spent { .. } => "spent",
             Wire::AlreadySpent { .. } => "already_spent",
+            Wire::FileAsk { .. } => "file_ask",
+            Wire::FilePut { .. } => "file_put",
+            Wire::FileStored { .. } => "file_stored",
+            Wire::FileGet { .. } => "file_get",
+            Wire::FileChunk { .. } => "file_chunk",
             Wire::Err { .. } => "err",
         }
     }
@@ -236,6 +293,27 @@ pub fn spend_signing_bytes(
     diavlos_core::canonical::canonical_json(&serde_json::json!({
         "spend": 1, "room_id": room_id, "approve_id": approve_id, "action_hash": action_hash,
         "op_id": op_id, "spender": spender, "node": node, "ts": ts,
+    }))
+    .into_bytes()
+}
+
+/// The bytes a member signs on a file request. `op` is ask, put or get.
+/// `at` is the size (ask) or the offset (put, get); `chunk` is the
+/// fingerprint of the piece on a put, empty otherwise.
+#[allow(clippy::too_many_arguments)]
+pub fn file_signing_bytes(
+    op: &str,
+    room_id: &str,
+    name: &str,
+    file: &str,
+    at: u64,
+    chunk: &str,
+    ts: &str,
+    node: &str,
+) -> Vec<u8> {
+    diavlos_core::canonical::canonical_json(&serde_json::json!({
+        "file": 1, "op": op, "room_id": room_id, "name": name, "id": file,
+        "at": at, "chunk": chunk, "ts": ts, "node": node,
     }))
     .into_bytes()
 }

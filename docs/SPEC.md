@@ -442,7 +442,22 @@ many bytes of a JSON object tagged with `t`.
 | `sync` / `messages` | member → home | "Give me everything after this seq." Signed. |
 | `push` / `ack` | home → member | New messages, unsolicited. |
 | `spend` / `spent`, `already_spent` | member → home | Record the spend of an approve (section 2.5). Signed over `room_id`, `approve_id`, `action_hash`, `op_id`, `spender`, `node`, `ts`. |
+| `file_ask` / `file_stored` | member → home | Before sending a file: may it come, and how many bytes of it does the home hold already. |
+| `file_put` / `file_stored` | member → home | One piece of a file, base64, at an offset; at most 1 MiB. The home checks the whole file against its id before it keeps it. |
+| `file_get` / `file_chunk` | member → home | One piece of a file a message in the room points at. |
 | `err` | either | The request failed. See below. |
+
+`hello_ok` may carry `features`, a list of what the helper can do beyond
+this table's first rows; `files` means the three file requests. An older
+helper sends none, and a member does not send it file requests.
+
+Every file request is signed by the member's key over the canonical JSON
+of `{"file": 1, "op", "room_id", "name", "id", "at", "chunk", "ts",
+"node"}`: `op` is `ask`, `put` or `get`; `at` is the size (ask) or the
+offset (put, get); `chunk` is the lowercase hex SHA-256 of a put's piece
+and empty otherwise; `node` is the requester's node id. The home refuses a
+request more than 300 seconds old. File references on messages are
+described in [FILES.md](FILES.md).
 
 An `err` frame carries `code` (the same codes as the CLI's exit codes) and
 `msg`, and from version 1.2 of the reference implementation two optional

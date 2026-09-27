@@ -12,6 +12,22 @@ imply a change to the wire.
 
 ### Added
 
+- Files on messages: `diavlos send <room> "text" --file <path>` (more than
+  once for more files) and `diavlos get <room> <file-or-message-id>`; in
+  MCP, `files` on `diavlos_send` and a new `diavlos_get_file`. The bytes go
+  helper to helper over the same encrypted link, through the public relay
+  when needed, in signed 1 MiB pieces to the room's home, which checks them
+  against their SHA-256 fingerprint before it takes the message; the reader
+  checks them again. `get` saves to `~/.diavlos/files/<room>/` under a
+  cleaned name, never runnable, adds `.unsafe` to names that would run on
+  a double click, and warns when the bytes could run or do not match their
+  name. Per room in `policy.toml`: `files = "any" | "safe" | "off"` (off by
+  default in confidential and pii rooms), 25 MB a file, 5 a message,
+  200 MB a member a day, 2 GB for the room, kept 7 days after everyone has
+  fetched them and 30 at most. Text files get the secret scan. Helpers now
+  say what they can do in their hello, so a helper sending to an older home
+  is told to update it. See [docs/FILES.md](docs/FILES.md).
+
 - `diavlos wake add|list|test|remove`: wake an agent that is not running
   when a message waits for it. The helper owns the rule, so it survives
   logout and reboot. A rule runs a local command or POSTs to an HTTPS
