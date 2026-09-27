@@ -26,7 +26,24 @@ are really there.
 **Names:** `diavlos`, `diavlos-core`, `diavlos-client`. All three were free
 as of 2026-09-21. Publishing claims them.
 
-Get a token once, at https://crates.io/settings/tokens. Scope it to
+**From the browser** (no token, no computer): once the release build for
+a tag is done, run Actions → **publish** → Run workflow, with the tag. It
+publishes the three crates in order, skipping any already there, then
+publishes `server.json` to the MCP Registry (step 6). It uses trusted
+publishing, so each crate needs this once, on crates.io, at
+`https://crates.io/crates/<crate>/settings` → Trusted Publishing → Add:
+
+| Field | Value |
+|---|---|
+| Publisher | GitHub |
+| Repository owner | `harisnopen` |
+| Repository name | `diavlos` |
+| Workflow filename | `publish.yml` |
+| Environment | *(blank)* |
+
+Do it for `diavlos-core`, `diavlos-client` and `diavlos`.
+
+**By hand**, get a token once, at https://crates.io/settings/tokens. Scope it to
 "publish-new" and "publish-update". Then:
 
 ```bash
@@ -228,6 +245,10 @@ brew install mcp-publisher
 mcp-publisher login github     # opens a browser; log in as harisnopen
 mcp-publisher publish          # reads ./server.json
 ```
+
+Or let the **publish** workflow do it (see step 1): it logs in with
+`mcp-publisher login github-oidc`, which needs nothing set up, and uses
+`server.json` from `main`.
 
 Check it landed:
 
