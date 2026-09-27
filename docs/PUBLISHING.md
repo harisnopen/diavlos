@@ -217,7 +217,7 @@ lists the crates.io package and how to start the server (`diavlos mcp`).
 
 npm is out of the listing for now: the npm account needs its security key
 to set up trusted publishing, so npm still carries 1.0.0 and the registry
-would refuse a listing that names npm 2.1.0. When npm has the current
+would refuse a listing that names npm 2.1.1. When npm has the current
 version again, put the npm package back in `server.json` (the same block
 as the cargo one, with `"registryType": "npm"`, `"registryBaseUrl":
 "https://registry.npmjs.org"` and `"runtimeHint": "npx"`).

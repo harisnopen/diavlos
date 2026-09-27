@@ -364,7 +364,9 @@ fn export_verify_events_watch_hold_rotate() {
         .find_map(|l| l.strip_prefix("owner key "))
         .unwrap()
         .to_string();
-    a.ok(&["verify", path.to_str().unwrap(), "--owner", &fp]);
+    let out = a.ok(&["verify", path.to_str().unwrap(), "--owner", &fp]);
+    assert!(out.contains("the one you expected"), "{out}");
+    assert!(!out.contains("or pass --owner"), "{out}");
     assert_eq!(
         a.code(&[
             "verify",

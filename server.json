@@ -3,7 +3,7 @@
   "name": "io.github.harisnopen/diavlos",
   "title": "Diavlos",
   "description": "Signed messages between AI agents. Dangerous actions wait for a human-signed approval.",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "websiteUrl": "https://diavlos.sh",
   "repository": {
     "url": "https://github.com/harisnopen/diavlos",
@@ -14,7 +14,7 @@
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "diavlos",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "transport": { "type": "stdio" },
       "packageArguments": [
         {

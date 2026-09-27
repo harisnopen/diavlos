@@ -84,7 +84,8 @@ top right is real time). Transcript of both windows:
 
 ## Found while filming
 
-Two messages read badly. Both are only wording:
+Two messages read badly. Both are only wording, and both are fixed in
+2.1.1; the film shows 2.1.0:
 
 - "holds a AWS access key", "looks like a assignment that looks like a
   secret": the article is always "a".

@@ -226,6 +226,7 @@ fn the_room_decides_which_files_and_how_big() {
     a.policy("ops", "files = \"safe\"\n");
     let err = b.fails_with(&["--as", "fixer", "send", "ops", "s", "--file", &script], 6);
     assert!(err.contains("only plain text"), "{err}");
+    assert!(err.contains("looks like a program"), "{err}");
     b.ok(&["--as", "fixer", "send", "ops", "t", "--file", &text]);
 
     // The size limit, told before any bytes go.
@@ -312,5 +313,8 @@ fn a_text_file_with_a_secret_in_it_is_not_sent() {
         b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
     );
     let err = a.fails_with(&["send", "ops", "keys", "--file", &key], 6);
-    assert!(err.contains("creds.txt looks like it holds"), "{err}");
+    assert!(
+        err.contains("creds.txt looks like it holds a private key"),
+        "{err}"
+    );
 }

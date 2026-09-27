@@ -34,7 +34,7 @@ fn patterns() -> &'static [Pattern] {
             mk("JWT", r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
             mk("Diavlos key", r"ed25519:[0-9a-f]{64}\b(?:[^\S]|$)*\bsecret"),
             mk(
-                "assignment that looks like a secret",
+                "password or key set in plain text",
                 // The optional quote after the name is for JSON: `"password":"..."`.
                 r#"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\b['"]?\s*[:=]\s*['"]?[A-Za-z0-9_\-/+=]{20,}"#,
             ),
@@ -100,7 +100,7 @@ mod tests {
         );
         assert_eq!(
             find_secret("API_KEY=abcdefghijklmnopqrstuvwxyz1234"),
-            Some("assignment that looks like a secret")
+            Some("password or key set in plain text")
         );
         assert_eq!(
             find_secret("xoxb-1234567890-abcdefghij"),

@@ -10,6 +10,33 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+## [2.1.1] — 2026-09-27
+
+Clearer messages, and films of eight things Diavlos does. Nothing changes
+on the wire or in the room's files; upgrade in any order.
+
+### Fixed
+
+- A refused secret now says "an AWS access key", "an OpenAI or Anthropic
+  key", not "a AWS …". A password or key written as `password = …` is
+  named as such, not as "a assignment that looks like a secret". The
+  `kind` of that `secret_refused` event in `diavlos events` changes the
+  same way, to "password or key set in plain text".
+- A room with `files = "safe"` says a refused file "looks like a program"
+  (or "a gzip file", or "is none of those") instead of "looks like
+  program".
+- `verify --owner` no longer tells you to pass `--owner`: it says the owner
+  key is the one you expected.
+
+### Added
+
+- Eight filmed runs on two cloud desktops, each with a video, a transcript
+  and the scripts that ran it: files there and back, waking an agent, the
+  room's home offline and back, two agents claiming one task, stopping a
+  runaway agent, what does not get sent, chains of hand-offs that stop,
+  and an audit you can check. See
+  [docs/use-cases](docs/use-cases/README.md).
+
 ## [2.1.0] — 2026-09-27
 
 Files on messages, waking agents that are not running, and chains of work
@@ -331,7 +358,8 @@ bundle, plus a CycloneDX SBOM.
   services. `doctor` for support tickets, `/metrics` on localhost for
   Prometheus, zero telemetry.
 
-[Unreleased]: https://github.com/harisnopen/diavlos/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/harisnopen/diavlos/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/harisnopen/diavlos/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/harisnopen/diavlos/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/harisnopen/diavlos/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/harisnopen/diavlos/releases/tag/v1.0.0
