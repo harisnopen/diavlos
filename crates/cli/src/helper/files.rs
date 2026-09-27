@@ -159,10 +159,14 @@ fn unfinished_bytes(helper: &Helper, room: &Room, id: &str) -> u64 {
 /// In a `safe` room, only what is on the safe list, by its bytes.
 fn check_kind(room: &Room, policy: &Policy, name: &str, kind: Kind) -> Result<()> {
     if policy.file_mode(room.class) == FileMode::Safe && !kind.is_safe() {
+        let what = match kind {
+            Kind::Program => "looks like a program",
+            Kind::Gzip => "looks like a gzip file",
+            _ => "is none of those",
+        };
         return Err(Error::Denied(format!(
-            "room {} takes only plain text, pictures, PDF and ZIP (files = \"safe\"); {name} looks like {}",
-            room.name,
-            kind.as_str()
+            "room {} takes only plain text, pictures, PDF and ZIP (files = \"safe\"); {name} {what}",
+            room.name
         )));
     }
     Ok(())
@@ -347,8 +351,9 @@ pub async fn attach(
                     serde_json::json!({"kind": hit, "file": true}),
                 );
                 return Err(Error::Denied(format!(
-                    "refused: {name} looks like it holds a {hit}, so it was not sent. \
-                     (secret_scan = false in config turns the scan off)"
+                    "refused: {name} looks like it holds {}, so it was not sent. \
+                     (secret_scan = false in config turns the scan off)",
+                    super::local::with_article(hit)
                 )));
             }
         }

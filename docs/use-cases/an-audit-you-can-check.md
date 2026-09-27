@@ -87,7 +87,8 @@ top right is real time). Transcript of both windows:
 ## Found while filming
 
 `verify --owner` still prints "check the owner key matches `diavlos
-who`, or pass --owner" after it has checked the owner key. Only wording.
+who`, or pass --owner" after it has checked the owner key. Only wording;
+fixed in 2.1.1, where it says the owner key is the one you expected.
 
 ## How it was filmed
 

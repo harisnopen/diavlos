@@ -898,6 +898,12 @@ pub(super) async fn join_over(
     })
 }
 
+/// "a" or "an" before what the secret scan found: "an AWS access key", "a JWT".
+pub(crate) fn with_article(name: &str) -> String {
+    let an = name.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']);
+    format!("{} {name}", if an { "an" } else { "a" })
+}
+
 /// Turn a draft into a signed message, filling in what the type needs.
 async fn build(
     helper: &Helper,
@@ -920,7 +926,8 @@ async fn build(
                 serde_json::json!({"kind": hit}),
             );
             return Err(Error::Denied(format!(
-                "refused: that looks like a {hit}, so it was not sent. (secret_scan = false in config turns the scan off)"
+                "refused: that looks like {}, so it was not sent. (secret_scan = false in config turns the scan off)",
+                with_article(hit)
             )));
         }
     }
@@ -2541,5 +2548,21 @@ mod tests {
         assert!(stream.is_ok());
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod article_tests {
+    use super::with_article;
+
+    #[test]
+    fn says_a_or_an() {
+        assert_eq!(with_article("AWS access key"), "an AWS access key");
+        assert_eq!(
+            with_article("OpenAI or Anthropic key"),
+            "an OpenAI or Anthropic key"
+        );
+        assert_eq!(with_article("JWT"), "a JWT");
+        assert_eq!(with_article("private key"), "a private key");
     }
 }

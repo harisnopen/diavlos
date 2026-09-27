@@ -1357,6 +1357,7 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
         Cmd::Verify { bundle, owner } => {
             let text = std::fs::read_to_string(&bundle)?;
             let mut report = diavlos_core::bundle::verify(&text)?;
+            let owner_checked = owner.is_some();
             if let Some(want) = owner {
                 if !want.eq_ignore_ascii_case(&report.owner_fingerprint) {
                     report.problems.push(format!(
@@ -1384,10 +1385,14 @@ async fn run(cli: Cli, paths: Paths) -> Result<i32, Error> {
             println!("owner key {}", report.owner_fingerprint);
             if report.ok() {
                 println!("OK: every signature verifies and the chain is whole.");
-                println!(
-                    "That proves the bundle is whole, not whose it is: check the owner key \
+                if owner_checked {
+                    println!("The owner key is the one you expected.");
+                } else {
+                    println!(
+                        "That proves the bundle is whole, not whose it is: check the owner key \
 matches `diavlos who`, or pass --owner."
-                );
+                    );
+                }
                 Ok(0)
             } else {
                 for p in &report.problems {
