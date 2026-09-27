@@ -317,9 +317,12 @@ fn no_nudge_for_your_own_message_a_notice_or_a_paused_room() {
 fn deliver_is_refused_in_a_confidential_room() {
     let home = Home::new("conf", 1000);
     home.room_with_runner(Some("confidential"));
+    // Any file that exists will do: the rule is refused before it runs.
+    let program = home.dir.join("config.toml");
+    let program = program.to_str().unwrap();
     let out = home.run_as(
         "runner",
-        &["wake", "add", "ops", "--exec", "/bin/true", "--deliver"],
+        &["wake", "add", "ops", "--exec", program, "--deliver"],
     );
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
@@ -328,7 +331,7 @@ fn deliver_is_refused_in_a_confidential_room() {
         "{err}"
     );
     // A nudge is fine there.
-    home.ok_as("runner", &["wake", "add", "ops", "--exec", "/bin/true"]);
+    home.ok_as("runner", &["wake", "add", "ops", "--exec", program]);
     // And a URL rule never delivers, in any room.
     let out = home.run_as(
         "runner",
