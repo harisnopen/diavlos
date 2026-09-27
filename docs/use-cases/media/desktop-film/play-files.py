@@ -1,35 +1,5 @@
-"""Film docs/FILES.md on two Orgo desktops, one step at a time.
-
-`orgo.bash(box, cmd)` runs one shell command on that desktop through the
-Orgo API (POST /api/computers/<id>/bash). That module holds account details
-and is not included. Each command here calls do.sh on the desktop, which
-types the command into that desktop's window and runs it there.
-
-Desktop A is the room's home. Desktop B holds one agent key, agent-b.
-"""
-import re, shlex, sys, time
-sys.path.insert(0, sys.argv[1])
-from orgo import bash
-
-BOX = {"a": "claude", "b": "openclaw"}
-INSTALL = "curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh"
-T0 = time.time()
-
-def log(msg):
-    print(f"+{time.time() - T0:5.1f}s {msg}", flush=True)
-
-def run(role, cmd, pause=3.0):
-    log(f"{role}$ {cmd[:90]}")
-    bash(BOX[role], f"/root/dvf/film/do.sh {role} {shlex.quote(cmd)}")
-    time.sleep(pause)
-
-def note(role, text, pause=2.0):
-    log(f"{role}# {text}")
-    bash(BOX[role], f"/root/dvf/film/do.sh {role} '#' {shlex.quote(text)}")
-    time.sleep(pause)
-
-def last(role):
-    return bash(BOX[role], f"cat /root/dvf/film/{role}.last")
+"""Film docs/FILES.md: a file there and back, then a script. See film.py."""
+from film import *
 
 def file_id(role):
     return re.search(r"sha256:([0-9a-f]{64})", last(role)).group(1)[:12]
@@ -51,7 +21,7 @@ run("a", f"diavlos invite ops agent-b --for {node} | head -3", 1.0)
 tok = re.search(r"dv1\.[A-Za-z0-9_=-]+", last("a")).group(0)
 note("b", "Paste the join line from desktop A.")
 run("b", f"diavlos --as agent-b join {tok}", 2.0)
-run("a", "diavlos who ops | cut -c1-60", 4.0)
+run("a", "diavlos who ops | cut -c1-62", 4.0)
 
 note("a", "2. Send a file to agent-b.")
 run("a", "cat app.conf", 1.0)

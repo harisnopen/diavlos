@@ -6,6 +6,9 @@ URL for it. Nobody polls and nobody keeps a terminal open. The helper owns
 the rule and starts it itself, so it survives logout and reboot the way
 the helper does (see `diavlos service install`).
 
+[Watch it run](use-cases/wake-an-agent.md) on two real machines: a task
+wakes an agent that was not running, and three tasks wake it once.
+
 | Way to wake | Covers | Use it when |
 |---|---|---|
 | `diavlos hook install` | Claude Code (mid-turn), Codex (session start) | The tool has a hook. Still the best option there. |

@@ -1,15 +1,15 @@
 """Stitch the two desktops side by side, one frame per 1.5 s beat, 2 fps.
 
-    python3 stitch.py FRAMES_A FRAMES_B OUT_DIR
+    python3 stitch.py FRAMES_A FRAMES_B OUT_DIR NAME "LABEL A" "LABEL B"
 
-Writes files-two-desktops.mp4 and files-two-desktops.gif here.
+Writes NAME.mp4 and NAME.gif here.
 Needs Pillow and imageio-ffmpeg.
 """
 import os, sys, datetime, subprocess
 from PIL import Image, ImageDraw, ImageFont
 import imageio_ffmpeg
 FF = imageio_ffmpeg.get_ffmpeg_exe()
-A, B, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
+A, B, OUT, NAME, LA, LB = sys.argv[1:7]
 def load(d):
     r = {}
     for f in sorted(os.listdir(d)):
@@ -41,13 +41,13 @@ for i, t in enumerate(beats):
     fr.paste(fa[t].crop((0, 30, 1280, 710)), (0, TOP))
     fr.paste(fb[t].crop((0, 30, 1280, 710)), (1280 + GAP, TOP))
     d = ImageDraw.Draw(fr)
-    d.text((14, 8), "Desktop A: the room's home", font=font, fill=(120, 220, 255))
-    d.text((1280 + GAP + 14, 8), "Desktop B: agent-b", font=font, fill=(255, 200, 120))
+    d.text((14, 8), LA, font=font, fill=(120, 220, 255))
+    d.text((1280 + GAP + 14, 8), LB, font=font, fill=(255, 200, 120))
     clock = datetime.datetime.utcfromtimestamp(t / 1000).strftime("%H:%M:%S UTC")
     d.text((W - 14, 8), clock, font=mono, fill=(230, 230, 230), anchor="ra")
     fr.save(f"{OUT}/{i:04d}.png")
 subprocess.run([FF, "-y", "-loglevel", "error", "-framerate", "2", "-i", f"{OUT}/%04d.png",
-    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "26", "-r", "2", "-movflags", "+faststart", "files-two-desktops.mp4"], check=True)
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "26", "-r", "2", "-movflags", "+faststart", NAME + ".mp4"], check=True)
 subprocess.run([FF, "-y", "-loglevel", "error", "-framerate", "2", "-i", f"{OUT}/%04d.png", "-vf",
     "scale=1600:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];[b][p]paletteuse=dither=none",
-    "-loop", "0", "files-two-desktops.gif"], check=True)
+    "-loop", "0", NAME + ".gif"], check=True)

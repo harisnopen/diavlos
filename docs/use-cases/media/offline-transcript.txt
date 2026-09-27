@@ -1,0 +1,49 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. What each window showed.
+The right-hand window on B (status and outbox, every second) is not in here; see the film.
+
+==================== DESKTOP A ====================
+# Desktop A: desk-a, the room's home. reporter is an agent on desktop B.
+$ diavlos read ops
+[1] desk-a (system): desk-a made the room and joined as owner
+[2] desk-a (system): reporter joined as task-giver (agent)
+
+# The home goes away: stop its helper.
+$ diavlos stop
+helper stopped
+
+# The home is back. Any command starts the helper.
+$ diavlos status
+diavlos 2.1.0  node d7e869c947...  home ~/.diavlos
+  ops                  home    linked    2 members, 2 messages (you: desk-a)
+$ diavlos read ops
+[1] desk-a (system): desk-a made the room and joined as owner
+[2] desk-a (system): reporter joined as task-giver (agent)
+[3] reporter (chat): report 1: all good
+[4] reporter (chat): report 2: disk at 71%
+[5] reporter (chat): report 3: health file
+    file sha256:71bc808e39d8577a2277665d5b7a903ca5a88a6cf018e6c91d56ef18b7d25b25 health.txt (24 bytes) - diavlos get to fetch it
+
+# All three, in order. The file came too:
+$ diavlos get ops 71bc808e39d8 && cat ~/.diavlos/files/ops/health.txt
+saved ~/.diavlos/files/ops/health.txt (24 bytes, text, from reporter)
+disk 71% used
+load 0.42
+
+# Done.
+
+==================== DESKTOP B ====================
+# B keeps working. It sends three reports and a file.
+$ diavlos --as reporter send ops 'report 1: all good'
+queued m_01M3J131HDZJJYSS4C8HT8MQYY (the room's home is offline; it will go when it is back)
+$ diavlos --as reporter send ops 'report 2: disk at 71%'
+queued m_01M3J138KSE4HCPKETAAVHM7MX (the room's home is offline; it will go when it is back)
+$ diavlos --as reporter send ops 'report 3: health file' --file health.txt
+queued m_01M3J13F6Y0HAPAN3AVQ3K7D5A (its files are still on the way to the room's home; it goes when they are there)
+    file sha256:71bc808e39d8577a2277665d5b7a903ca5a88a6cf018e6c91d56ef18b7d25b25 health.txt (24 bytes)
+
+# Nothing is lost. They wait in the outbox, signed.
+
+# B saw the home come back. The outbox is empty.
+
+# Done.

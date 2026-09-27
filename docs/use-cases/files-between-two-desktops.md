@@ -124,16 +124,20 @@ the top right is real time). Full transcript of both windows:
 ## How it was filmed
 
 Each step was sent to its desktop by
-[`play.py`](media/files-film/play.py), which runs one shell command at a
+[`play-files.py`](media/desktop-film/play-files.py), which runs one shell command at a
 time through the Orgo API. On the desktop,
-[`do.sh`](media/files-film/do.sh) types the command into the log that its
+[`do.sh`](media/desktop-film/do.sh) types the command into the log that its
 window shows, runs it, and shows the output. On screen the home folder is
 shown as `~`, and invite tokens and node ids are cut short; file
-fingerprints are shown in full. [`setup.sh`](media/files-film/setup.sh)
+fingerprints are shown in full. [`setup.sh`](media/desktop-film/setup.sh)
 made a clean home and the two files A sends;
-[`stage.sh`](media/files-film/stage.sh) opened the window.
+[`stage.sh`](media/desktop-film/stage.sh) opened the window.
 
-[`rec.sh`](media/files-film/rec.sh) took a screenshot of each desktop
+[`rec.sh`](media/desktop-film/rec.sh) took a screenshot of each desktop
 every 1.5 s, on the same beat on both (the two desktop clocks were
-seconds apart, so each got its offset). [`stitch.py`](media/files-film/stitch.py)
+seconds apart, so each got its offset). [`stitch.py`](media/desktop-film/stitch.py)
 put each pair side by side at 2 frames per second.
+
+This film was shot before [`take.py`](media/desktop-film/take.py) and
+[`film.py`](media/desktop-film/film.py) were written; the steps and the
+way of filming are the same.

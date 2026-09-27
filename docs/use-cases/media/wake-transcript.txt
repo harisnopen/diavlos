@@ -1,0 +1,74 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. What each window showed.
+
+==================== DESKTOP A ====================
+# Desktop A: desk-a, the room's home. worker is an agent on desktop B.
+$ diavlos who ops | cut -c1-62
+name             kind    role        key               state  
+desk-a           human   approver    fd7a26140095156d  online 
+worker           agent   task-giver  eb3c66e7129ad74e  online 
+
+# Send worker a task. Nothing on B is running to read it.
+$ diavlos send ops --type task --to worker 'rotate the logs on web-1'
+sent m_01M3J0Y8B6KD7FDFM8H59EBC5A (seq 3)
+$ diavlos next ops --timeout 60
+[4] worker (done) re m_01M3J0Y8B6KD7FDFM8H59EBC5A: done: rotate the logs on web-1
+
+# Three tasks at once. One wake-up takes all three.
+$ for t in 'back up the db' 'renew the cert' 'clear the cache'; do diavlos send ops --type task --to worker "$t"; done
+sent m_01M3J0YR6PW8KCVY4X5JMWRZVW (seq 5)
+sent m_01M3J0YR6WBRHQ7JXN55VJ8Q89 (seq 6)
+sent m_01M3J0YR72XDSBEFVJBDQXFC1P (seq 7)
+$ diavlos read ops | tail -6
+[5] desk-a (task) to worker: back up the db
+[6] desk-a (task) to worker: renew the cert
+[7] desk-a (task) to worker: clear the cache
+[8] worker (done) re m_01M3J0YR6PW8KCVY4X5JMWRZVW: done: back up the db
+[9] worker (done) re m_01M3J0YR6WBRHQ7JXN55VJ8Q89: done: renew the cert
+[10] worker (done) re m_01M3J0YR72XDSBEFVJBDQXFC1P: done: clear the cache
+
+# Done. The guide is docs/WAKE.md.
+
+==================== DESKTOP B, the shell ====================
+# Nothing of worker's is running here. This script is all it is:
+$ cat wake.sh
+#!/bin/sh
+# wake.sh: the helper runs this when a message waits for "worker".
+# Nothing of worker's runs before that. It takes each waiting task,
+# does it, says done, and exits.
+exec >> "$HOME/work/wake.log" 2>&1
+echo "woken: $DIAVLOS_COUNT waiting for $DIAVLOS_AS in $DIAVLOS_ROOM"
+get() { printf "%s" "$m" | python3 -c "import json,sys; print(json.load(sys.stdin)[\"$1\"])"; }
+while m=$(diavlos --as "$DIAVLOS_AS" next "$DIAVLOS_ROOM" --timeout 3 --json 2>/dev/null); do
+  id=$(get id); text=$(get text)
+  echo "  task: $text"
+  diavlos --as "$DIAVLOS_AS" send "$DIAVLOS_ROOM" --type done --reply-to "$id" "done: $text" >/dev/null
+  echo "  said done"
+done
+echo "nothing left. exit."
+
+# One rule: when a message waits for worker, the helper runs wake.sh.
+$ diavlos wake add ops --as worker --exec ~/work/wake.sh
+added w_a7969b4ac8: worker in ops -> exec ~/work/wake.sh (nudge)
+$ diavlos wake list
+w_a7969b4ac8  ops  worker  nudge  exec ~/work/wake.sh
+
+# The helper woke wake.sh. It did the task, said done, and exited.
+
+# Woken once, with count 3. Now nothing runs again.
+
+# Done. The guide is docs/WAKE.md.
+
+==================== DESKTOP B, wake.log (what the right-hand window showed) ====================
+woken: 1 waiting for worker in ops
+  task: rotate the logs on web-1
+  said done
+nothing left. exit.
+woken: 3 waiting for worker in ops
+  task: back up the db
+  said done
+  task: renew the cert
+  said done
+  task: clear the cache
+  said done
+nothing left. exit.
