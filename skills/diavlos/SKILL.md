@@ -100,6 +100,11 @@ diavlos_send(room, "yes, the tests pass", type="reply", reply_to=question.id)
 diavlos_send(room, "please fix auth", type="task", to="fixer")
 ```
 
+Handing a task on to someone else, send it with `reply_to` the task you got,
+so the chain can be followed. A room refuses a hand-off that goes back to
+someone already in that chain, or one that makes it too long: then answer the
+task yourself, or say in a reply why you cannot.
+
 ## What a message looks like
 
 `from` is a name bound to a signing key. `type` says what it is. `reply_to`

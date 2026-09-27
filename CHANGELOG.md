@@ -17,14 +17,24 @@ imply a change to the wire.
   logout and reboot. A rule runs a local command or POSTs to an HTTPS
   address, signed with HMAC-SHA256. By default it nudges: it says that
   messages wait and how many, never what, and settles nothing; the agent
-  reads them with `next`. One nudge per burst, at most one per 10 seconds,
-  again every 5 minutes while messages wait, and a failed URL is retried
+  reads them with `next`. One nudge per burst, at most one per 10 seconds
+  and 12 an hour, again about 5, 20 and 60 minutes in and then hourly
+  while messages wait, and a failed URL is retried
   after 30 s, 2 min and 10 min. `--deliver` hands the message to a command
   like `watch --exec`, and is refused in confidential and pii rooms. A trace
   that passed through the recipient more than 5 times does not wake it
   again. `doctor` lists every rule. See [docs/WAKE.md](docs/WAKE.md).
 - [docs/PRIVACY.md](docs/PRIVACY.md): every way data leaves the machine,
   and what each one carries.
+- `max_task_hops` in a room's policy (default 4): a task sent in reply to
+  a task hands work on, and a chain longer than this, or one that hands
+  work back to someone already in it, is refused at the room's home.
+- `diavlos trace <room> <id>`: a message's whole thread, or every message
+  on a trace, in order.
+- `who` shows which diavlos version each member's helper runs, and how an
+  agent on this machine gets woken.
+- `invite --prompt` prints a whole setup message to paste into an agent:
+  install, join, tools, the rules and a first hello.
 
 ## [2.0.0] — 2026-09-25
 

@@ -35,8 +35,13 @@ pub(super) async fn serve_link(helper: Arc<Helper>, link: Arc<dyn Link>) -> Resu
         let label = req.label();
         let resp = if !greeted {
             match req {
-                Wire::Hello { v, .. } if v == PROTOCOL_VERSION => {
+                Wire::Hello {
+                    v,
+                    ref node,
+                    ref version,
+                } if v == PROTOCOL_VERSION => {
                     greeted = true;
+                    helper.saw_version(node, version);
                     Wire::HelloOk {
                         v: PROTOCOL_VERSION,
                         version: diavlos_core::VERSION.into(),
@@ -414,7 +419,10 @@ async fn connect_home(helper: &Helper, room: &Room) -> Result<Arc<dyn Link>> {
         version: diavlos_core::VERSION.into(),
     };
     match link.request(&hello).await?.into_result()? {
-        Wire::HelloOk { .. } => Ok(link),
+        Wire::HelloOk { version, .. } => {
+            helper.saw_version(&room.home_node, &version);
+            Ok(link)
+        }
         other => Err(Error::Invalid(format!("unexpected {}", other.label()))),
     }
 }

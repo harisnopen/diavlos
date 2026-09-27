@@ -25,8 +25,8 @@ diavlos wake remove <id>
 ```
 
 `--as` names the agent the rule wakes, and it must already be in the room.
-`--renudge <secs>` changes how often a rule nudges again while messages
-wait unread (default 300).
+`--renudge <secs>` makes a rule nudge again at that fixed interval while
+messages wait unread, instead of the default steps below.
 
 Rules live next to the room's policy, in `~/.diavlos/rooms/<room>/wake.toml`.
 Secrets are never in that file (see below). `diavlos doctor` lists every
@@ -56,10 +56,12 @@ How it behaves:
 
 - **One nudge per burst.** Messages that land close together make one
   nudge: ten in two seconds fire once, with `count: 10`. At most one nudge
-  per rule every 10 seconds.
+  per rule every 10 seconds, and at most 12 in any hour.
 - **Nudge again until drained.** While messages still wait unread and are
-  not held by the agent, the rule nudges again every 5 minutes. A missed
-  wake-up is recovered, not lost. It stops once nothing waits.
+  not held by the agent, the rule nudges again about 5, 20 and 60 minutes
+  after the first nudge, then once an hour. A missed wake-up is recovered,
+  not lost, and a sleeping agent is not hammered. It stops once nothing
+  waits; a new message starts the steps again.
 - **A nudge settles nothing.** A message is done only when the agent reads
   it with `next` and acks it. A nudge that lands and is ignored loses
   nothing.
@@ -164,7 +166,8 @@ content, never the secret, and for a URL only the host.
   to `policy.toml`.
 - **Codex:** installing the Codex hook does not add a wake rule by itself.
   Add one with `wake add` if you want Codex started when a message waits.
-- **Re-nudge:** 5 minutes by default, per rule with `--renudge`.
+- **Re-nudge:** about 5, 20 and 60 minutes in, then hourly, by default;
+  a fixed interval per rule with `--renudge`.
 
 ## Not in this version
 

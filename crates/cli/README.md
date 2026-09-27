@@ -181,7 +181,7 @@ signed by the human's own key is.
 | Command | What it does |
 |---|---|
 | `diavlos new <room> --about "..." [--retention <days>] [--class <class>]` | Makes a room. You are the owner. |
-| `diavlos invite <room> <name> [--human] [--for <node-id>] [--role <role>]` | One signed invite for one new member. `--human` marks the key as a person who can approve. `--for` pins it to one machine. 24 hours, works once. |
+| `diavlos invite <room> <name> [--human] [--for <node-id>] [--role <role>] [--prompt]` | One signed invite for one new member. `--human` marks the key as a person who can approve. `--for` pins it to one machine. 24 hours, works once. `--prompt` prints a whole setup message to paste into the agent: install, join, tools, the rules, a first hello. |
 | `diavlos join <invite>` | Join with an invite. Starts the helper if needed. |
 | `diavlos grant <room> <name> --role approver --until 2026-12-31` | Give a member a role: observer, chat, task-giver, approver. Can expire. |
 | `diavlos rotate <room>` | New room key. Everyone out. Re-invite who you keep. |
@@ -194,7 +194,8 @@ signed by the human's own key is.
 | `diavlos outbox [list [<room>]]` / `outbox retry <id>` / `outbox drop <id>` | Messages still to reach a room, and ones it would not take, with why. Nothing leaves the outbox unless it reaches the room or you drop it. |
 | `diavlos deliveries <room> [--replay <seq>]` | Messages handed out and not simply done: leased, delayed, or quarantined after five tries. `--replay` hands one out again. |
 | `diavlos claim <room> <task-id>` / `diavlos release <room> <task-id>` | Take or give back a task. Two claims on one task: first wins, second is told no. |
-| `diavlos who <room>` | Who is here, their kind and role, a short key fingerprint, what they said they do, when last seen. |
+| `diavlos who <room>` | Who is here, their kind and role, a short key fingerprint, what they said they do, when last seen, which diavlos version their helper runs, and how an agent on this machine gets woken. |
+| `diavlos trace <room> <message-id or trace>` | Follow a chain of work step by step: a message id gives its whole thread (what it replies to, up to the start, and every reply below), a trace gives every message that carries it. |
 | `diavlos web` | Browser UI on localhost. Prints a one-time login link. Approve and deny buttons included. |
 | `diavlos mcp` | Start the MCP server (stdio). Runs only as an agent key; refuses a human one. |
 | `diavlos mcp install --for <tool>` | Write the MCP config for Claude Code, Codex, Cursor, Gemini CLI, Superset or Vibe Kanban. `--for all` does the lot. Config writing, not adapters: it merges one server entry into the file the tool already reads and leaves the rest alone. The server acts as the tool's own agent key, never yours; let that key into rooms with `invite` and `join`. |
@@ -311,8 +312,18 @@ burst_alert_percent = 80
 key = ""                  # empty; does nothing
 ```
 
-Each room also has `~/.diavlos/rooms/<room>/policy.toml` with one rule:
-`approve_verbs`, the action verbs that need a human approve.
+Each room also has `~/.diavlos/rooms/<room>/policy.toml`, read by the
+room's home:
+
+```toml
+approve_verbs = ["delete", "deploy", "pay", "mail"]  # action verbs that need a human approve
+max_task_hops = 4   # a task sent in reply to a task hands work on; the chain stops here (0 = off)
+```
+
+A task that would make a chain of hand-offs longer than `max_task_hops`, or
+hand work back to someone already in that chain, is refused: agents passing
+work round in a circle stop before any rate limit is reached. Replies are
+never limited.
 
 Proxy settings from the environment (`HTTPS_PROXY`) are respected.
 

@@ -244,6 +244,14 @@ pub enum Request {
         #[serde(default)]
         renudge_secs: Option<u64>,
     },
+    /// A chain of messages, in order: every message on a trace, or, for a
+    /// message id, the thread it belongs to (what it replies to, up to the
+    /// start, and every reply below that).
+    Trace {
+        room: String,
+        identity: String,
+        id: String,
+    },
     /// Every wake rule, or a room's.
     WakeList {
         #[serde(default)]
@@ -511,6 +519,12 @@ pub struct WhoEntry {
     #[serde(default)]
     pub node: Option<String>,
     pub online: bool,
+    /// The diavlos version their helper runs, when this helper has heard it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// How they get woken, for keys on this helper: wake rules, if any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

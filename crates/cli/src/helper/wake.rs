@@ -11,7 +11,7 @@
 //! A nudge never touches the delivery: the message is settled only when
 //! the agent reads it with `next`, so an ignored nudge loses nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,8 +33,11 @@ const MIN_GAP: u64 = 10;
 const QUIET: u64 = 1;
 /// A burst is nudged at the latest this long after it began.
 const MAX_GATHER: u64 = 10;
-/// While messages still wait unread, nudge again this often.
-pub const RENUDGE: u64 = 300;
+/// While messages still wait unread, nudge again after these waits: about
+/// 5, 20 and 60 minutes in, then once an hour until they are read.
+const RENUDGE_STEPS: [u64; 4] = [300, 900, 2400, 3600];
+/// No rule nudges more often than this in any hour, whatever arrives.
+const HOURLY_CAP: usize = 12;
 /// Retries after a failed nudge; then give up on the burst.
 const BACKOFF: [u64; 3] = [30, 120, 600];
 /// Look again at least this often: pauses end, leases run out.
@@ -314,6 +317,12 @@ struct Burst {
     seen_seq: u64,
     changed: Option<Instant>,
     began: Option<Instant>,
+    /// Re-nudges sent for what already waits, since the last new burst.
+    renudges: usize,
+    /// Whether the nudge being fired is for a new burst.
+    firing_new: bool,
+    /// When nudges went out in the last hour, for the hourly cap.
+    fires: VecDeque<Instant>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -329,7 +338,13 @@ enum Outcome {
 }
 
 impl Burst {
-    fn decide(&mut self, p: &WakePending, now: Instant, renudge: Duration) -> Next {
+    /// The wait before the next re-nudge: the rule's own fixed interval, or
+    /// the growing default steps.
+    fn renudge_wait(&self, fixed: Option<Duration>) -> Duration {
+        fixed.unwrap_or_else(|| secs(RENUDGE_STEPS[self.renudges.min(RENUDGE_STEPS.len() - 1)]))
+    }
+
+    fn decide(&mut self, p: &WakePending, now: Instant, fixed: Option<Duration>) -> Next {
         if p.count == 0 {
             self.failures = 0;
             self.retry_at = None;
@@ -356,16 +371,26 @@ impl Burst {
             (changed + secs(QUIET)).min(began + secs(MAX_GATHER))
         } else if p.newest_seq > self.gave_up_seq {
             match self.last_ok {
-                Some(t) => t + renudge,
+                Some(t) => t + self.renudge_wait(fixed),
                 None => return Next::Wait(None),
             }
         } else {
             return Next::Wait(None);
         };
-        let ready = match self.last_fire {
+        self.firing_new = new;
+        let mut ready = match self.last_fire {
             Some(t) => ready.max(t + secs(MIN_GAP)),
             None => ready,
         };
+        let hour = secs(3600);
+        while self.fires.front().is_some_and(|t| *t + hour <= now) {
+            self.fires.pop_front();
+        }
+        if self.fires.len() >= HOURLY_CAP {
+            if let Some(oldest) = self.fires.front() {
+                ready = ready.max(*oldest + hour);
+            }
+        }
         if now >= ready {
             Next::Fire
         } else {
@@ -375,9 +400,15 @@ impl Burst {
 
     fn fired(&mut self, p: &WakePending, ok: bool, now: Instant) -> Outcome {
         self.last_fire = Some(now);
+        self.fires.push_back(now);
         self.began = None;
         self.changed = None;
         if ok {
+            if self.firing_new {
+                self.renudges = 0;
+            } else {
+                self.renudges += 1;
+            }
             self.last_ok = Some(now);
             self.nudged_seq = p.newest_seq;
             self.failures = 0;
@@ -409,7 +440,7 @@ fn pending(helper: &Helper, room: &Room, reader: &str) -> WakePending {
 
 async fn run_nudge(helper: Arc<Helper>, rule: WakeRule) {
     let mut rx = helper.subscribe();
-    let renudge = secs(rule.renudge_secs.unwrap_or(RENUDGE));
+    let renudge = rule.renudge_secs.map(secs);
     let mut burst = Burst::default();
     let mut looped_seen = 0;
     loop {
@@ -655,65 +686,54 @@ mod tests {
     }
 
     const RENUDGE_TEST: Duration = Duration::from_secs(300);
+    const FIXED: Option<Duration> = Some(RENUDGE_TEST);
 
     #[tokio::test(start_paused = true)]
     async fn a_burst_waits_for_quiet_then_fires_once() {
         let mut b = Burst::default();
         let t0 = Instant::now();
         // Messages keep landing: wait.
-        assert!(matches!(
-            b.decide(&p(1, 5), t0, RENUDGE_TEST),
-            Next::Wait(Some(_))
-        ));
+        assert!(matches!(b.decide(&p(1, 5), t0, FIXED), Next::Wait(Some(_))));
         let t1 = t0 + Duration::from_millis(500);
-        assert!(matches!(
-            b.decide(&p(4, 8), t1, RENUDGE_TEST),
-            Next::Wait(Some(_))
-        ));
+        assert!(matches!(b.decide(&p(4, 8), t1, FIXED), Next::Wait(Some(_))));
         // A second of quiet: fire, with everything that landed.
         let t2 = t1 + secs(QUIET);
-        assert_eq!(b.decide(&p(4, 8), t2, RENUDGE_TEST), Next::Fire);
+        assert_eq!(b.decide(&p(4, 8), t2, FIXED), Next::Fire);
         assert!(matches!(b.fired(&p(4, 8), true, t2), Outcome::Ok));
         // Nothing new: no nudge until the re-nudge interval.
         assert_eq!(
-            b.decide(&p(4, 8), t2 + secs(1), RENUDGE_TEST),
+            b.decide(&p(4, 8), t2 + secs(1), FIXED),
             Next::Wait(Some(t2 + RENUDGE_TEST))
         );
-        assert_eq!(
-            b.decide(&p(4, 8), t2 + RENUDGE_TEST, RENUDGE_TEST),
-            Next::Fire
-        );
+        assert_eq!(b.decide(&p(4, 8), t2 + RENUDGE_TEST, FIXED), Next::Fire);
     }
 
     #[tokio::test(start_paused = true)]
     async fn never_more_than_one_nudge_per_gap() {
         let mut b = Burst::default();
         let t0 = Instant::now();
-        let _ = b.decide(&p(1, 1), t0, RENUDGE_TEST);
+        let _ = b.decide(&p(1, 1), t0, FIXED);
         let t1 = t0 + secs(QUIET);
-        assert_eq!(b.decide(&p(1, 1), t1, RENUDGE_TEST), Next::Fire);
+        assert_eq!(b.decide(&p(1, 1), t1, FIXED), Next::Fire);
         b.fired(&p(1, 1), true, t1);
         // A new message right after: held until the gap has passed.
-        let _ = b.decide(&p(2, 2), t1 + secs(1), RENUDGE_TEST);
+        let _ = b.decide(&p(2, 2), t1 + secs(1), FIXED);
         assert_eq!(
-            b.decide(&p(2, 2), t1 + secs(3), RENUDGE_TEST),
+            b.decide(&p(2, 2), t1 + secs(3), FIXED),
             Next::Wait(Some(t1 + secs(MIN_GAP)))
         );
-        assert_eq!(
-            b.decide(&p(2, 2), t1 + secs(MIN_GAP), RENUDGE_TEST),
-            Next::Fire
-        );
+        assert_eq!(b.decide(&p(2, 2), t1 + secs(MIN_GAP), FIXED), Next::Fire);
     }
 
     #[tokio::test(start_paused = true)]
     async fn failures_back_off_then_give_up_until_something_new() {
         let mut b = Burst::default();
         let mut now = Instant::now();
-        let _ = b.decide(&p(3, 3), now, RENUDGE_TEST);
+        let _ = b.decide(&p(3, 3), now, FIXED);
         now += secs(QUIET);
         let mut waits = Vec::new();
         for _ in 0..BACKOFF.len() {
-            assert_eq!(b.decide(&p(3, 3), now, RENUDGE_TEST), Next::Fire);
+            assert_eq!(b.decide(&p(3, 3), now, FIXED), Next::Fire);
             match b.fired(&p(3, 3), false, now) {
                 Outcome::Retry(w) => {
                     waits.push(w);
@@ -723,29 +743,75 @@ mod tests {
             }
         }
         assert_eq!(waits, BACKOFF.map(secs).to_vec());
-        assert_eq!(b.decide(&p(3, 3), now, RENUDGE_TEST), Next::Fire);
+        assert_eq!(b.decide(&p(3, 3), now, FIXED), Next::Fire);
         assert!(matches!(b.fired(&p(3, 3), false, now), Outcome::GaveUp));
         // Given up: no re-nudge for the same burst, however long it waits.
         assert_eq!(
-            b.decide(&p(3, 3), now + RENUDGE_TEST * 10, RENUDGE_TEST),
+            b.decide(&p(3, 3), now + RENUDGE_TEST * 10, FIXED),
             Next::Wait(None)
         );
         // A new message starts a new burst.
         let later = now + RENUDGE_TEST * 10;
-        let _ = b.decide(&p(4, 4), later, RENUDGE_TEST);
+        let _ = b.decide(&p(4, 4), later, FIXED);
+        assert_eq!(b.decide(&p(4, 4), later + secs(QUIET), FIXED), Next::Fire);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn re_nudges_space_out_then_settle_at_hourly() {
+        let mut b = Burst::default();
+        let t0 = Instant::now();
+        let _ = b.decide(&p(1, 1), t0, None);
+        let mut now = t0 + secs(QUIET);
+        assert_eq!(b.decide(&p(1, 1), now, None), Next::Fire);
+        b.fired(&p(1, 1), true, now);
+        // Still unread: 5, then 15, then 40 minutes, then every hour.
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            let Next::Wait(Some(at)) = b.decide(&p(1, 1), now, None) else {
+                panic!("expected a wait");
+            };
+            waits.push((at - now).as_secs() / (secs(1).as_secs().max(1)));
+            now = at;
+            assert_eq!(b.decide(&p(1, 1), now, None), Next::Fire);
+            b.fired(&p(1, 1), true, now);
+        }
+        assert_eq!(waits, vec![300, 900, 2400, 3600, 3600]);
+        // Something new starts the steps again.
+        let _ = b.decide(&p(2, 2), now, None);
+        now += secs(MIN_GAP);
+        assert_eq!(b.decide(&p(2, 2), now, None), Next::Fire);
+        b.fired(&p(2, 2), true, now);
         assert_eq!(
-            b.decide(&p(4, 4), later + secs(QUIET), RENUDGE_TEST),
-            Next::Fire
+            b.decide(&p(2, 2), now, None),
+            Next::Wait(Some(now + secs(300)))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_more_than_the_hourly_cap() {
+        let mut b = Burst::default();
+        let start = Instant::now();
+        let mut now = start;
+        for seq in 1..=HOURLY_CAP as u64 {
+            let _ = b.decide(&p(seq, seq), now, None);
+            now += secs(MIN_GAP);
+            assert_eq!(b.decide(&p(seq, seq), now, None), Next::Fire, "nudge {seq}");
+            b.fired(&p(seq, seq), true, now);
+        }
+        // One more burst inside the hour waits for the oldest to age out.
+        let next = HOURLY_CAP as u64 + 1;
+        let _ = b.decide(&p(next, next), now, None);
+        let first = start + secs(MIN_GAP);
+        assert_eq!(
+            b.decide(&p(next, next), now + secs(MIN_GAP), None),
+            Next::Wait(Some(first + secs(3600)))
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn drained_means_quiet() {
         let mut b = Burst::default();
-        assert_eq!(
-            b.decide(&p(0, 0), Instant::now(), RENUDGE_TEST),
-            Next::Wait(None)
-        );
+        assert_eq!(b.decide(&p(0, 0), Instant::now(), FIXED), Next::Wait(None));
     }
 
     #[test]

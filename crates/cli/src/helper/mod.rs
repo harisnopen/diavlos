@@ -76,6 +76,9 @@ pub struct Helper {
     clock_skew: std::sync::atomic::AtomicI64,
     /// For URL wake rules only. Proxy settings come from the environment.
     pub http: reqwest::Client,
+    /// The diavlos version each peer helper said it runs, by node id, from
+    /// its hello. For `who`.
+    pub node_versions: std::sync::Mutex<HashMap<String, String>>,
     /// One task per wake rule, by rule id.
     wake_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
@@ -109,6 +112,13 @@ impl Helper {
     pub fn skew_clock(&self, secs: i64) {
         self.clock_skew
             .fetch_add(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Remember what version a peer helper runs.
+    pub fn saw_version(&self, node: &str, version: &str) {
+        if let Ok(mut m) = self.node_versions.lock() {
+            m.insert(node.to_string(), version.to_string());
+        }
     }
 
     fn notify_room(&self, room_id: &str, seq: u64) {
@@ -451,6 +461,7 @@ impl Helper {
         };
         let policy = self.policy(room);
         self.policy_hook.check(&policy, &msg)?;
+        self.check_task_chain(room, &msg, policy.max_task_hops)?;
         let alert = self
             .store
             .check_limits(&room.id, &msg.from, &self.config.limits)?;
@@ -627,6 +638,56 @@ impl Helper {
             MessageType::Deny | MessageType::Reply => Ok(()),
             _ => Ok(()),
         }
+    }
+
+    /// A task sent in reply to a task hands work on. Follow that chain back
+    /// and refuse a task that would make it longer than `max_hops`, or hand
+    /// work back to someone already in it: agents passing work round in a
+    /// circle stop here, before any rate limit is reached.
+    pub(crate) fn check_task_chain(&self, room: &Room, msg: &Message, max_hops: u32) -> Result<()> {
+        if max_hops == 0 || msg.kind != MessageType::Task {
+            return Ok(());
+        }
+        let mut in_chain: Vec<String> = Vec::new();
+        let mut hops = 1u32;
+        let mut next = msg.reply_to.clone();
+        // A chain longer than this has already been refused somewhere.
+        let mut guard = 0;
+        while let Some(id) = next {
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+            let Some(parent) = self.store.message_by_id(&id)? else {
+                break;
+            };
+            if parent.room != room.id {
+                break;
+            }
+            if parent.kind == MessageType::Task {
+                hops += 1;
+                in_chain.push(parent.from.clone());
+                if let Some(to) = &parent.to {
+                    in_chain.push(to.clone());
+                }
+            }
+            next = parent.reply_to.clone();
+        }
+        if hops > max_hops {
+            return Err(Error::Denied(format!(
+                "this task would be hop {hops} in one chain of hand-offs; the room allows \
+                 {max_hops} (max_task_hops in its policy). Answer the task you were given instead"
+            )));
+        }
+        if let Some(to) = &msg.to {
+            if in_chain.iter().any(|n| n == to) {
+                return Err(Error::Denied(format!(
+                    "{to} is already in this chain of hand-offs; handing the task back would \
+                     go round in a circle. Reply to it instead"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Home side: a helper notice signed by the owner key. Best effort.
@@ -914,6 +975,7 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         faults: Default::default(),
         clock_skew: Default::default(),
         http: crate::bridge::webhook::client(),
+        node_versions: std::sync::Mutex::new(HashMap::new()),
         wake_tasks: Mutex::new(HashMap::new()),
     });
     helper.emit(
