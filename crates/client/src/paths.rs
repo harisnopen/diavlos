@@ -69,6 +69,14 @@ impl Paths {
     pub fn policy(&self, room: &str) -> PathBuf {
         self.home.join("rooms").join(room).join("policy.toml")
     }
+    /// A room's wake rules, next to its policy.
+    pub fn wake(&self, room: &str) -> PathBuf {
+        self.home.join("rooms").join(room).join("wake.toml")
+    }
+    /// Where a URL rule's secret lives when there is no OS keychain.
+    pub fn wake_secret(&self, id: &str) -> PathBuf {
+        self.keys_dir().join(format!("wake-{id}.secret"))
+    }
 
     /// The local socket name. A file under the home dir on Unix (so it can
     /// be 0600); a namespaced pipe on Windows.

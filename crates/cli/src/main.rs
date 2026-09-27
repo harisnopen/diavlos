@@ -17,7 +17,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use diavlos_client::proto::{
     AskResult, CheckApproveResult, DeliveryItem, DraftWire, ExportResult, InviteResult, JoinResult,
-    NextResult, OutboxItem, ReadResult, Request, RotateResult, SendResult, StatusResult, WhoEntry,
+    NextResult, OutboxItem, ReadResult, Request, RotateResult, SendResult, StatusResult, WakeMode,
+    WakeRule, WakeTestResult, WhoEntry,
 };
 use diavlos_client::{Client, Paths};
 use diavlos_core::{ControlOp, DataClass, Error, Message, MessageType, Role};
@@ -309,6 +310,13 @@ enum Cmd {
         #[command(subcommand)]
         which: Option<OutboxCmd>,
     },
+    /// Wake an agent that is not running when a message waits for it: the
+    /// helper runs a command or POSTs to a URL. Rules survive logout and
+    /// reboot. A nudge says that something arrived, never what.
+    Wake {
+        #[command(subcommand)]
+        which: WakeCmd,
+    },
     /// See rooms and peers.
     Status {
         #[arg(long)]
@@ -413,6 +421,46 @@ enum OutboxCmd {
     /// Give up on a failed or quarantined message. Its content is wiped;
     /// a record that it was dropped stays.
     Drop { id: String },
+}
+
+#[derive(Subcommand)]
+enum WakeCmd {
+    /// Add a rule for `--as <agent>` in a room. Give --exec or --url.
+    Add {
+        room: String,
+        /// Run this program. It gets the nudge in DIAVLOS_WAKE_JSON and
+        /// friends (or, with --deliver, the message, like `watch --exec`).
+        #[arg(long, conflicts_with = "url")]
+        exec: Option<String>,
+        /// POST a signed nudge to this HTTPS address.
+        #[arg(long, requires = "secret_env")]
+        url: Option<String>,
+        /// The variable holding the signing secret for --url. Its value is
+        /// kept in the OS keychain (or a 0600 file), never in the rule.
+        #[arg(long)]
+        secret_env: Option<String>,
+        /// Hand over the message itself and ack when the command exits 0.
+        /// --exec only; refused in confidential and pii rooms.
+        #[arg(long, requires = "exec")]
+        deliver: bool,
+        /// Nudge again after this many seconds while messages still wait
+        /// unread. Default 300.
+        #[arg(long)]
+        renudge: Option<u64>,
+    },
+    /// Every rule and what it points at.
+    List {
+        room: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fire a rule once with a made-up nudge and print the result.
+    Test {
+        id: String,
+    },
+    Remove {
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1287,6 +1335,100 @@ matches `diavlos who`, or pass --owner."
             }
             Ok(0)
         }
+        Cmd::Wake { which } => match which {
+            WakeCmd::Add {
+                room,
+                exec,
+                url,
+                secret_env,
+                deliver,
+                renudge,
+            } => {
+                // The helper runs the program from its own directory, so a
+                // relative path is made absolute here.
+                let exec = match exec {
+                    Some(e) => {
+                        let p = std::path::Path::new(&e);
+                        if p.exists() {
+                            Some(std::fs::canonicalize(p)?.to_string_lossy().to_string())
+                        } else if e.contains(['/', '\\']) {
+                            return Err(Error::Invalid(format!("{e}: no such file")));
+                        } else {
+                            eprintln!("note: {e} is looked up on the helper's PATH when it fires");
+                            Some(e)
+                        }
+                    }
+                    None => None,
+                };
+                let secret = match &secret_env {
+                    Some(var) => match std::env::var(var) {
+                        Ok(v) if !v.is_empty() => Some(v),
+                        _ => {
+                            return Err(Error::Invalid(format!(
+                                "{var} is empty: put the signing secret in it first"
+                            )))
+                        }
+                    },
+                    None => None,
+                };
+                let v = client
+                    .call(&Request::WakeAdd {
+                        room,
+                        identity,
+                        exec,
+                        url,
+                        secret,
+                        secret_env,
+                        deliver,
+                        renudge_secs: renudge,
+                    })
+                    .await?;
+                let r: WakeRule = serde_json::from_value(v)?;
+                println!(
+                    "added {}: {} in {} -> {} ({})",
+                    r.id,
+                    r.identity,
+                    r.room,
+                    r.target_label(),
+                    wake_mode(r.mode)
+                );
+                Ok(0)
+            }
+            WakeCmd::List { room, json } => {
+                let v = client.call(&Request::WakeList { room }).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    return Ok(0);
+                }
+                let rules: Vec<WakeRule> = serde_json::from_value(v)?;
+                if rules.is_empty() {
+                    println!("no wake rules; add one with `diavlos wake add <room> --as <agent> --exec <program>`");
+                }
+                for r in rules {
+                    println!(
+                        "{}  {}  {}  {}  {}",
+                        r.id,
+                        r.room,
+                        r.identity,
+                        wake_mode(r.mode),
+                        r.target_label()
+                    );
+                }
+                Ok(0)
+            }
+            WakeCmd::Test { id } => {
+                let v = client.call(&Request::WakeTest { id }).await?;
+                let r: WakeTestResult = serde_json::from_value(v)?;
+                println!("{}", r.detail);
+                Ok(if r.ok { 0 } else { 1 })
+            }
+            WakeCmd::Remove { id } => {
+                let v = client.call(&Request::WakeRemove { id }).await?;
+                let r: WakeRule = serde_json::from_value(v)?;
+                println!("removed {} ({} in {})", r.id, r.identity, r.room);
+                Ok(0)
+            }
+        },
         Cmd::Outbox { which } => match which.unwrap_or(OutboxCmd::List {
             room: None,
             json: false,
@@ -1660,6 +1802,13 @@ fn print_message(m: &Message, json: bool) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn wake_mode(m: WakeMode) -> &'static str {
+    match m {
+        WakeMode::Nudge => "nudge",
+        WakeMode::Deliver => "deliver",
+    }
 }
 
 #[cfg(test)]

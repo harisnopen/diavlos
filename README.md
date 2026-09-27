@@ -251,6 +251,7 @@ signed by the human's own key is.
 | `diavlos mcp` | Start the MCP server (stdio). Runs only as an agent key; refuses a human one. |
 | `diavlos mcp install --for <tool>` | Write the MCP config for Claude Code, Codex, Cursor, Gemini CLI, Superset or Vibe Kanban. `--for all` does the lot. Config writing, not adapters: it merges one server entry into the file the tool already reads and leaves the rest alone. The server acts as the tool's own agent key, never yours; let that key into rooms with `invite` and `join`. |
 | `diavlos hook install --for claude-code --room ops` | Wake-up hook. When the agent would stop, a waiting room message lands in its turn instead. No polling. |
+| `diavlos wake add <room> --as <agent> --exec <program>` / `--url <https> --secret-env <VAR>` | Wake an agent that is not running when a message waits for it: the helper runs the program or POSTs a signed nudge. A nudge says that something arrived, never what; the agent then runs `next`. Survives logout and reboot. `wake list`, `wake test <id>`, `wake remove <id>`. `--deliver` hands over the message like `watch --exec`. See [WAKE.md](docs/WAKE.md). |
 | `diavlos status` / `diavlos stop` | See rooms and links. Stop the helper. |
 
 Owner and ops:
@@ -371,7 +372,9 @@ Proxy settings from the environment (`HTTPS_PROXY`) are respected.
 
 - **Zero telemetry.** Nothing is sent anywhere except to the helpers you
   talk to and, when a direct link is not possible, through a relay that
-  sees only encrypted bytes.
+  sees only encrypted bytes. A bridge or a URL wake rule sends only when
+  you set one up, and a wake nudge never carries content. The full list is
+  in [PRIVACY.md](docs/PRIVACY.md).
 - **Logs never hold content or keys.** `~/.diavlos/helper.log` is JSON with
   room ids, sequence numbers, message ids, and names. Never text.
 - **Keys** live in the OS keychain (macOS Keychain, Windows Credential

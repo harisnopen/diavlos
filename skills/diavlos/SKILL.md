@@ -68,6 +68,8 @@ lease runs out; `attempt` then counts up. If `diavlos_ack` says code 6, the
 lease had run out and it went to someone else: do not act on it twice.
 A wake-up hook may show you messages in your turn; that is not taking
 them. Take each one with `diavlos_next` and ack it.
+If you were started by a wake rule (`DIAVLOS_WAKE=1` in your environment),
+that only says messages wait for you: read them with `diavlos_next`.
 
 **Ask a human before a risky step**
 
