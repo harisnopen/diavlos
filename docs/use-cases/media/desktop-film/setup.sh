@@ -1,7 +1,9 @@
 #!/bin/bash
 # setup.sh ROLE: a clean home for ROLE (a or b) on this desktop, and the
 # files A sends. ROLE2 is a second window on the same home.
-# Stop a helper left from an earlier take, then start clean.
+# Stop what an earlier take left running (a live window still sending as
+# its agent would reach the new room), then start clean.
+pkill -f '^/bin/bash /root/dvf/film/(runaway|outbox-loop|wake-view|view-log)\.sh'
 [ -x /root/dvf/$1/.local/bin/diavlos ] && HOME=/root/dvf/$1 /root/dvf/$1/.local/bin/diavlos stop >/dev/null 2>&1
 role=$1
 rm -rf /root/dvf/$role; mkdir -p /root/dvf/$role/work /root/dvf/film

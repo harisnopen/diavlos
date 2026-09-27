@@ -2,7 +2,8 @@
 
     python3 take.py ORGO_DIR FILM OUT_DIR
 
-FILM is wake, offline or claim. Pushes these scripts to both desktops,
+FILM is the name in play-FILM.py (wake, offline, claim, runaway,
+notsent, chains or audit). Pushes these scripts to both desktops,
 runs play-FILM.py, and, once the room is set up, opens the windows and
 records both screens with rec.sh. Then pulls the frames and each window's
 log into OUT_DIR. stitch.py makes the video from the frames.
@@ -21,6 +22,14 @@ STAGE = {
              "b": ("DESKTOP B  a shell", LOG("b"), "DESKTOP B  live: worker's wake.log", "/root/dvf/film/wake-view.sh")},
     "offline": {"a": ("DESKTOP A  desk-a, the room's home", LOG("a")),
                 "b": ("DESKTOP B  agent reporter", LOG("b"), "DESKTOP B  live: link and outbox", "/root/dvf/film/outbox-loop.sh")},
+    "runaway": {"a": ("DESKTOP A  desk-a, the owner", LOG("a")),
+                "b": ("DESKTOP B  agent bot", "/root/dvf/film/runaway.sh")},
+    "notsent": {"a": ("DESKTOP A  desk-a, the room's home", LOG("a")),
+                "b": ("DESKTOP B  agent bot", LOG("b"))},
+    "chains": {"a": ("DESKTOP A  desk-a, the owner", LOG("a"), "DESKTOP A  agent a1", LOG("a2")),
+               "b": ("DESKTOP B  agents b1, b2, b3", LOG("b"))},
+    "audit": {"a": ("DESKTOP A  desk-a, the owner", LOG("a")),
+              "b": ("DESKTOP B  agent w2, and the auditor", LOG("b"))},
     "claim": {"a": ("DESKTOP A  desk-a, the room's home", LOG("a"), "DESKTOP A  agent w1", LOG("a2")),
               "b": ("DESKTOP B  agent w2", LOG("b"))},
 }[FILM]

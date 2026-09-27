@@ -50,7 +50,9 @@ def room(b_agents=(), a_agents=()):
     nb = re.search(r"node ([0-9a-f]{64})", quiet("b", "diavlos status")).group(1)
     for role, names, node in (("b", b_agents, nb), ("a", a_agents, None)):
         for name in names:
+            name, _, r = name.partition(":")  # "name:role" for a role other than task-giver
             pin = f" --for {node}" if node else ""
+            pin += f" --role {r}" if r else ""
             tok = re.search(r"dv1\.[A-Za-z0-9_=-]+", quiet("a", f"diavlos invite ops {name}{pin}")).group(0)
             log(quiet(role, f"diavlos --as {name} join {tok}").strip())
 
