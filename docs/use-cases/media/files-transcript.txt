@@ -1,0 +1,109 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. Exactly what each window showed.
+
+==================== DESKTOP A ====================
+# Desktop A. Install diavlos 2.1.0 with install.sh.
+$ curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
+downloading https://github.com/harisnopen/diavlos/releases/latest/download/diavlos-x86_64-unknown-linux-gnu.tar.gz
+installed ~/.local/bin/diavlos
+next:  diavlos new <room>   then   diavlos invite <room> <name>
+$ diavlos --version
+diavlos 2.1.0
+
+# 1. Make a room. Invite agent-b, pinned to desktop B.
+$ diavlos new ops
+made room ops (r_evm6cv4eyy45fwmrpdc5ykqwge). You are the owner.
+Invite someone: diavlos invite ops <name> [--human]
+$ diavlos invite ops agent-b --for bb60e23aa6... | head -3
+Paste this into agent-b's session:
+
+    diavlos --as agent-b join dv1.eyJ2IjoxLCJyb29t...
+$ diavlos who ops | cut -c1-60
+name             kind    role        key               state
+desk-a           human   approver    c3f00d0e3157cbe4  onlin
+agent-b          agent   task-giver  15fc3212c041d531  onlin
+
+# 2. Send a file to agent-b.
+$ cat app.conf
+port = 8080
+workers = 2
+log = info
+$ diavlos send ops "config for the api, please check it" --file app.conf
+sent m_01M3HZ68Q0GEMR4PY8JP528S6B (seq 3)
+    file sha256:30c423d7648acdbee8ca4ac357d022b3a5664f44f898f5edd54f484987e8a3cf app.conf (35 bytes)
+$ diavlos next ops --timeout 60
+[4] agent-b (chat): workers 2 -> 8, please use this one
+    file sha256:a73a0702293ff4989568969f2bd9adfc3a352106d00a4c25f0ca72c4659a7aaa app.conf (35 bytes) - diavlos get to fetch it
+$ diavlos get ops a73a0702293f
+saved ~/.diavlos/files/ops/app.conf (35 bytes, text, from agent-b)
+$ sha256sum ~/.diavlos/files/ops/app.conf
+a73a0702293ff4989568969f2bd9adfc3a352106d00a4c25f0ca72c4659a7aaa  ~/.diavlos/files/ops/app.conf
+
+# The new version. What changed:
+$ diff app.conf ~/.diavlos/files/ops/app.conf
+2c2
+< workers = 2
+---
+> workers = 8
+
+# 4. Now a script file.
+$ cat restart.sh
+#!/bin/sh
+echo "restarting api"
+systemctl restart api
+$ diavlos send ops "restart script, for later" --file restart.sh
+sent m_01M3HZ7VZJ3YYD8XJ2ND59N76B (seq 5)
+    file sha256:cfd2c0b9b327783bb7de8199554d00e45557fed499001336f0e2794edf68fa20 restart.sh (54 bytes)
+
+# Done. The guide is docs/FILES.md.
+
+==================== DESKTOP B ====================
+# Desktop B. Install diavlos 2.1.0 with install.sh.
+$ curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
+downloading https://github.com/harisnopen/diavlos/releases/latest/download/diavlos-x86_64-unknown-linux-gnu.tar.gz
+installed ~/.local/bin/diavlos
+next:  diavlos new <room>   then   diavlos invite <room> <name>
+$ diavlos --version
+diavlos 2.1.0
+
+# This desktop's node id, for the invite.
+$ diavlos status | head -1
+diavlos 2.1.0  node bb60e23aa6...  home ~/.diavlos
+
+# Paste the join line from desktop A.
+$ diavlos --as agent-b join dv1.eyJ2IjoxLCJyb29t...
+joined ops as agent-b. 2 members, 2 messages so far.
+$ diavlos --as agent-b next ops --timeout 60
+[3] desk-a (chat): config for the api, please check it
+    file sha256:30c423d7648acdbee8ca4ac357d022b3a5664f44f898f5edd54f484987e8a3cf app.conf (35 bytes) - diavlos get to fetch it
+$ diavlos --as agent-b get ops 30c423d7648a
+saved ~/.diavlos/files/ops/app.conf (35 bytes, text, from desk-a)
+
+# get checked the SHA-256 fingerprint. Same by hand:
+$ sha256sum ~/.diavlos/files/ops/app.conf
+30c423d7648acdbee8ca4ac357d022b3a5664f44f898f5edd54f484987e8a3cf  ~/.diavlos/files/ops/app.conf
+
+# Same as the file id in the message. The check passed.
+
+# 3. agent-b changes the file and sends it back.
+$ cp ~/.diavlos/files/ops/app.conf . && sed -i 's/workers = 2/workers = 8/' app.conf && cat app.conf
+port = 8080
+workers = 8
+log = info
+$ diavlos --as agent-b send ops "workers 2 -> 8, please use this one" --file app.conf
+sent m_01M3HZ7DXKKEFMHVHXGM8P12DG (seq 4)
+    file sha256:a73a0702293ff4989568969f2bd9adfc3a352106d00a4c25f0ca72c4659a7aaa app.conf (35 bytes)
+$ diavlos --as agent-b next ops --timeout 60
+[5] desk-a (chat): restart script, for later
+    file sha256:cfd2c0b9b327783bb7de8199554d00e45557fed499001336f0e2794edf68fa20 restart.sh (54 bytes) - diavlos get to fetch it
+$ diavlos --as agent-b get ops cfd2c0b9b327
+saved ~/.diavlos/files/ops/restart.sh.unsafe (54 bytes, program, from desk-a)
+    warning: this file can run as a program; do not run it unless you trust who sent it
+$ ls -l ~/.diavlos/files/ops/
+total 8
+-rw------- 1 root root 35 Sep 27 17:39 app.conf
+-rw------- 1 root root 54 Sep 27 17:40 restart.sh.unsafe
+
+# Saved as restart.sh.unsafe, not runnable, with a warning. Nothing ran.
+
+# Done. The guide is docs/FILES.md.

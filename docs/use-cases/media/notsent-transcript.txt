@@ -1,0 +1,50 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. What each window showed.
+
+==================== DESKTOP A ====================
+$ diavlos read ops | tail -2
+[1] desk-a (system): desk-a made the room and joined as owner
+[2] desk-a (system): bot joined as task-giver (agent)
+
+# Nothing from bot reached the room.
+
+# The owner allows only safe files in this room:
+$ echo 'files = "safe"' >> ~/.diavlos/rooms/ops/policy.toml && diavlos policy ops --show | tail -1
+files = "safe"
+$ diavlos read ops | tail -3
+[2] desk-a (system): bot joined as task-giver (agent)
+[3] bot (chat): the chart
+    file sha256:75e4a2bc77bb5ac5e4dc076cc719b8b04b973563bea785f4cd1e97faf5624dc6 chart.png (191 bytes) - diavlos get to fetch it
+
+# Only the picture came in.
+
+==================== DESKTOP B ====================
+# Agent bot, about to make a mistake: send the .env file.
+$ cat .env
+DB_HOST=db.internal
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+$ diavlos --as bot send ops 'here is the env' --file .env; echo "exit $?"
+error: denied: refused: env looks like it holds a AWS access key, so it was not sent. (secret_scan = false in config turns the scan off)
+exit 6
+
+# Refused here, on this machine. It never left.
+$ diavlos --as bot send ops 'the db password = Tr0ub4dor-and-3-horses-9'; echo "exit $?"
+error: denied: refused: that looks like a assignment that looks like a secret, so it was not sent. (secret_scan = false in config turns the scan off)
+exit 6
+$ diavlos --as bot outbox
+the outbox is empty: everything sent has reached its room
+
+# A picture is fine.
+$ diavlos --as bot send ops 'the chart' --file chart.png
+sent m_01M3J2JMGVRMKB4E11R601F83B (seq 3)
+    file sha256:75e4a2bc77bb5ac5e4dc076cc719b8b04b973563bea785f4cd1e97faf5624dc6 chart.png (191 bytes)
+
+# A program named .png is not. The home looks at the bytes, not the name.
+$ diavlos --as bot send ops 'another chart' --file tool.png; echo "exit $?"
+error: denied: room ops takes only plain text, pictures, PDF and ZIP (files = "safe"); that file looks like program
+exit 6
+$ diavlos --as bot send ops 'a quick fix' --file fix.sh; echo "exit $?"
+error: denied: room ops takes only plain text, pictures, PDF and ZIP (files = "safe"); that file looks like program
+exit 6
+
+# Done.

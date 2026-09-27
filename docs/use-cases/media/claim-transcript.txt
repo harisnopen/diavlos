@@ -1,0 +1,79 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. What each window showed.
+
+==================== DESKTOP A, desk-a ====================
+# desk-a runs the room. w1 is an agent on this desktop, w2 on desktop B.
+$ diavlos who ops | cut -c1-44
+name             kind    role        key    
+desk-a           human   approver    1d6891a
+w2               agent   task-giver  a757af7
+w1               agent   task-giver  1b7623b
+
+# Post one task. Both agents want it.
+$ diavlos send ops --type task 'rotate the logs on web-1'
+sent m_01M3J1DCHXNZ82RK1NEEWBYXTE (seq 4)
+
+# A second task. This time the winner gives it back.
+$ diavlos send ops --type task 'renew the cert on web-2'
+sent m_01M3J1EJD83ZJ9QW0FPB7Q667A (seq 7)
+
+# What the room saw:
+$ diavlos read ops | tail -9 | cut -c1-76
+[3] desk-a (system): w1 joined as task-giver (agent)
+[4] desk-a (task): rotate the logs on web-1
+[5] w1 (claim) re m_01M3J1DCHXNZ82RK1NEEWBYXTE: claimed
+[6] w1 (done) re m_01M3J1DCHXNZ82RK1NEEWBYXTE: logs rotated
+[7] desk-a (task): renew the cert on web-2
+[8] w1 (claim) re m_01M3J1EJD83ZJ9QW0FPB7Q667A: claimed
+[9] w1 (release) re m_01M3J1EJD83ZJ9QW0FPB7Q667A: released
+[10] w2 (claim) re m_01M3J1EJD83ZJ9QW0FPB7Q667A: claimed
+[11] w2 (done) re m_01M3J1EJD83ZJ9QW0FPB7Q667A: cert renewed
+
+# Done.
+
+==================== DESKTOP A, agent w1 ====================
+$ diavlos --as w1 next ops --timeout 60
+[4] desk-a (task): rotate the logs on web-1
+
+# Both claim it, at the same moment.
+$ diavlos --as w1 claim ops m_01M3J1DCHXNZ82RK1NEEWBYXTE
+claimed m_01M3J1DCHXNZ82RK1NEEWBYXTE (m_01M3J1DN1K8EKYSFCWN1T3QJFJ)
+
+# w1 won. It does the work and says done.
+$ diavlos --as w1 send ops --type done --reply-to m_01M3J1DCHXNZ82RK1NEEWBYXTE 'logs rotated'
+sent m_01M3J1DXMEC15WWGHVD8RYDBD2 (seq 6)
+$ diavlos --as w1 next ops --timeout 60
+[7] desk-a (task): renew the cert on web-2
+$ diavlos --as w1 claim ops m_01M3J1EJD83ZJ9QW0FPB7Q667A
+claimed m_01M3J1EJD83ZJ9QW0FPB7Q667A (m_01M3J1ERN02ZTZ6Z0B3HXKTA2G)
+
+# Won it, but cannot do it now. Give it back.
+$ diavlos --as w1 release ops m_01M3J1EJD83ZJ9QW0FPB7Q667A
+released m_01M3J1EJD83ZJ9QW0FPB7Q667A (m_01M3J1EZG93Z93FJ9Z4TMPANSD)
+
+==================== DESKTOP B, agent w2 ====================
+$ diavlos --as w2 next ops --timeout 60
+[4] desk-a (task): rotate the logs on web-1
+
+# Both claim it, at the same moment.
+$ diavlos --as w2 claim ops m_01M3J1DCHXNZ82RK1NEEWBYXTE
+error: denied: already claimed by w1
+
+# w2 was told no. It tries again:
+$ diavlos --as w2 claim ops m_01M3J1DCHXNZ82RK1NEEWBYXTE; echo "exit $?"
+error: denied: already claimed by w1
+exit 6
+
+# Still no. No double work.
+$ diavlos --as w2 next ops --timeout 60
+[7] desk-a (task): renew the cert on web-2
+$ diavlos --as w2 claim ops m_01M3J1EJD83ZJ9QW0FPB7Q667A
+error: denied: already claimed by w1
+
+# Now the other agent can take it.
+$ diavlos --as w2 claim ops m_01M3J1EJD83ZJ9QW0FPB7Q667A
+claimed m_01M3J1EJD83ZJ9QW0FPB7Q667A (m_01M3J1FFRS2M4V8M13ZZYE39RY)
+$ diavlos --as w2 send ops --type done --reply-to m_01M3J1EJD83ZJ9QW0FPB7Q667A 'cert renewed'
+sent m_01M3J1FN1Y6E93RB03C2MTGQ86 (seq 11)
+
+# Done.

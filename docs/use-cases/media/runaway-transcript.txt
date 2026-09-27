@@ -1,0 +1,45 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. What each window showed.
+Desktop B's window (bot sending every 2 s) is in the film only.
+
+==================== DESKTOP A ====================
+# desk-a owns the room. On desktop B, agent bot sends a message every 2 s.
+$ diavlos read ops | tail -3
+[3] bot (chat): ping 1: all good here
+[4] bot (chat): ping 2: all good here
+[5] bot (chat): ping 3: all good here
+
+# 1. Kill switch: pause the whole room. Nothing moves.
+$ diavlos pause ops
+paused
+$ diavlos send ops 'even the owner waits'
+error: room paused: ops
+
+# Resume. Messages flow again.
+$ diavlos resume ops
+resumed
+
+# 2. Mute only bot. Everyone else can still talk.
+$ diavlos mute ops bot
+bot muted
+$ diavlos send ops 'the rest of the room still works'
+sent m_01M3J289ER7WVC0029GJX16HW4 (seq 15)
+
+# 3. Revoke bot's key for good.
+$ diavlos revoke ops bot
+bot revoked
+$ diavlos who ops | cut -c1-62
+name             kind    role        key               state  
+desk-a           human   approver    60911a46dab4655e  online 
+bot              agent   task-giver  1201a0c0db9a4dbb  gone   
+$ diavlos read ops | tail -8 | cut -c1-80
+[9] desk-a (control): room resumed
+[10] bot (chat): ping 13: all good here
+[11] bot (chat): ping 14: all good here
+[12] bot (chat): ping 15: all good here
+[13] bot (chat): ping 16: all good here
+[14] desk-a (control): bot muted
+[15] desk-a (chat): the rest of the room still works
+[16] desk-a (control): bot revoked
+
+# bot's key is cut. It can never send here again.

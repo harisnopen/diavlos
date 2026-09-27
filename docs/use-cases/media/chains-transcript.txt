@@ -1,0 +1,50 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. What each window showed.
+
+==================== DESKTOP A, desk-a ====================
+# desk-a owns the room. a1 is an agent here; b1, b2, b3 are on desktop B.
+$ diavlos policy ops --show | grep hops
+max_task_hops = 4
+
+# A task. Agents hand it on by sending a task in reply.
+$ diavlos send ops --type task --to a1 'ship release 2.2'
+sent m_01M3J2NF09FWJGTN0QEPW2TBA0 (seq 6)
+
+# The whole chain, from the first task:
+$ diavlos trace ops m_01M3J2NF09FWJGTN0QEPW2TBA0 | cut -c1-80
+[6] desk-a (task) to a1: ship release 2.2
+[7] a1 (task) to b1 re m_01M3J2NF09FWJGTN0QEPW2TBA0: build it
+[8] b1 (task) to b2 re m_01M3J2NJYR61RRSNYQEQ3EK6XH: test it
+[9] b2 (task) to b3 re m_01M3J2P3AMDHD92WHKVHPQ7K04: package it
+[10] b3 (done) re m_01M3J2PNWBKG36DBQCEYWYHWTH: packaged: release-2.2.tar.gz
+5 messages
+
+# Done.
+
+==================== DESKTOP A, agent a1 ====================
+$ diavlos --as a1 send ops --type task --to b1 --reply-to m_01M3J2NF09FWJGTN0QEPW2TBA0 'build it'
+sent m_01M3J2NJYR61RRSNYQEQ3EK6XH (seq 7)
+
+==================== DESKTOP B, agents b1, b2, b3 ====================
+$ diavlos --as b1 send ops --type task --to b2 --reply-to m_01M3J2NJYR61RRSNYQEQ3EK6XH 'test it'
+sent m_01M3J2P3AMDHD92WHKVHPQ7K04 (seq 8)
+
+# b2 tries to hand it back to a1, who is already in the chain:
+$ diavlos --as b2 send ops --type task --to a1 --reply-to m_01M3J2P3AMDHD92WHKVHPQ7K04 'your turn again'; echo "exit $?"
+error: denied: a1 is already in this chain of hand-offs; handing the task back would go round in a circle. Reply to it instead
+exit 6
+
+# Refused: that would go round in a circle. b2 hands it on instead.
+$ diavlos --as b2 send ops --type task --to b3 --reply-to m_01M3J2P3AMDHD92WHKVHPQ7K04 'package it'
+sent m_01M3J2PNWBKG36DBQCEYWYHWTH (seq 9)
+
+# b3 wants to pass it on once more:
+$ diavlos --as b3 send ops --type task --to desk-a --reply-to m_01M3J2PNWBKG36DBQCEYWYHWTH 'sign it'; echo "exit $?"
+error: denied: this task would be hop 5 in one chain of hand-offs; the room allows 4 (max_task_hops in its policy). Answer the task you were given instead
+exit 6
+
+# Refused: too many hand-offs. b3 answers instead.
+$ diavlos --as b3 send ops --type done --reply-to m_01M3J2PNWBKG36DBQCEYWYHWTH 'packaged: release-2.2.tar.gz'
+sent m_01M3J2Q9CY05T0NXBJRXBDCQDT (seq 10)
+
+# Done.

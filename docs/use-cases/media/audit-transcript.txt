@@ -1,0 +1,56 @@
+Filmed 2026-09-27 on two Orgo cloud desktops (Ubuntu 24.04), public internet.
+diavlos 2.1.0 from install.sh on each. Room ops. What each window showed.
+
+==================== DESKTOP A ====================
+# desk-a owns the room. Some work happens.
+$ diavlos send ops --type task 'rotate the logs on web-1'
+sent m_01M3J2XPG6KFPM2DFBMQCYEV5G (seq 4)
+
+# Export the room: every message, signed, in one file.
+$ diavlos export ops > ops.bundle && diavlos verify ops.bundle
+exported 6 messages
+room ops (r_wcafxgznhflb46dhvb3oakskhi), exported by desk-a at 2026-09-27T18:44:47Z, 6 messages (seq 1..6), 0 tombstones, chain from genesis
+owner key 344ca6df605b9cbe
+OK: every signature verifies and the chain is whole.
+That proves the bundle is whole, not whose it is: check the owner key matches `diavlos who`, or pass --owner.
+
+# Hand it to the auditor on desktop B.
+$ diavlos send ops 'audit bundle for today' --file ops.bundle
+sent m_01M3J2YBMVSZBT0A79JYEYWYEG (seq 7)
+    file sha256:7a84c4f09724da7409514a3ec8af396039c1d8b566258a4058abaae98d73f1e7 ops.bundle (7130 bytes)
+
+# Done.
+
+==================== DESKTOP B ====================
+$ diavlos --as w2 claim ops m_01M3J2XPG6KFPM2DFBMQCYEV5G
+claimed m_01M3J2XPG6KFPM2DFBMQCYEV5G (m_01M3J2Y3W7V2BTK6J8T5V2S9MS)
+$ diavlos --as w2 send ops --type done --reply-to m_01M3J2XPG6KFPM2DFBMQCYEV5G 'logs rotated'
+sent m_01M3J2Y9WCWN1BKDZ7J7F89W3W (seq 6)
+
+# The auditor: a read-only key. First, the owner key it should be:
+$ diavlos --as auditor who ops | head -2
+name             kind    role        key               state    last seen            says
+desk-a           human   approver    344ca6df605b9cbe  online   2026-09-27T18:44:30Z diavlos=2.1.0 [owner]
+$ diavlos --as auditor get ops 7a84c4f09724 && cp ~/.diavlos/files/ops/ops.bundle .
+saved ~/.diavlos/files/ops/ops.bundle (7130 bytes, text, from desk-a)
+$ diavlos verify ops.bundle --owner 344ca6df605b9cbe
+room ops (r_wcafxgznhflb46dhvb3oakskhi), exported by desk-a at 2026-09-27T18:44:47Z, 6 messages (seq 1..6), 0 tombstones, chain from genesis
+owner key 344ca6df605b9cbe
+OK: every signature verifies and the chain is whole.
+That proves the bundle is whole, not whose it is: check the owner key matches `diavlos who`, or pass --owner.
+
+# Now change one word in the log, as a cover-up would:
+$ sed -i 's/logs rotated/logs deleted/' ops.bundle && diavlos verify ops.bundle; echo "exit $?"
+room ops (r_wcafxgznhflb46dhvb3oakskhi), exported by desk-a at 2026-09-27T18:44:47Z, 6 messages (seq 1..6), 0 tombstones, chain from genesis
+owner key 344ca6df605b9cbe
+PROBLEM: content of seq 6 does not match its hash
+exit 1
+
+# Caught. Now expect a different owner key, as if the bundle were from someone else:
+$ cp ~/.diavlos/files/ops/ops.bundle . && diavlos verify ops.bundle --owner 0123456789abcdef; echo "exit $?"
+room ops (r_wcafxgznhflb46dhvb3oakskhi), exported by desk-a at 2026-09-27T18:44:47Z, 6 messages (seq 1..6), 0 tombstones, chain from genesis
+owner key 344ca6df605b9cbe
+PROBLEM: owner key is 344ca6df605b9cbe, not the 0123456789abcdef you expected
+exit 1
+
+# Caught too. verify needs no helper and no network.
