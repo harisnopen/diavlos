@@ -378,6 +378,43 @@ async fn dispatch(helper: &Arc<Helper>, req: Request) -> Result<serde_json::Valu
         Request::Outbox { room } => serde_json::to_value(outbox_list(helper, room.as_deref())?)?,
         Request::OutboxRetry { id } => serde_json::to_value(outbox_retry(helper, &id).await?)?,
         Request::OutboxDrop { id } => serde_json::to_value(outbox_drop(helper, &id)?)?,
+        Request::WakeAdd {
+            room,
+            identity,
+            exec,
+            url,
+            secret,
+            secret_env,
+            deliver,
+            renudge_secs,
+        } => serde_json::to_value(
+            super::wake::add(
+                helper,
+                super::wake::AddRule {
+                    room,
+                    identity,
+                    exec,
+                    url,
+                    secret,
+                    secret_env,
+                    deliver,
+                    renudge_secs,
+                },
+            )
+            .await?,
+        )?,
+        Request::WakeList { room } => {
+            let mut rules = super::wake::all_rules(helper);
+            if let Some(room) = room {
+                let name = helper.store.room(&room)?.name;
+                rules.retain(|r| r.room == name);
+            }
+            serde_json::to_value(rules)?
+        }
+        Request::WakeRemove { id } => {
+            serde_json::to_value(super::wake::remove(helper, &id).await?)?
+        }
+        Request::WakeTest { id } => serde_json::to_value(super::wake::test(helper, &id).await?)?,
         Request::Events { .. } | Request::Watch { .. } => {
             return Err(Error::Invalid("streaming op on a plain call".into()))
         }

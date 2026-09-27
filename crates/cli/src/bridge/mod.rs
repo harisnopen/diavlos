@@ -3,6 +3,7 @@
 pub mod buzz;
 pub mod slack;
 pub mod teams;
+pub mod webhook;
 
 use diavlos_client::proto::Request;
 use diavlos_client::Client;

@@ -10,6 +10,22 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+### Added
+
+- `diavlos wake add|list|test|remove`: wake an agent that is not running
+  when a message waits for it. The helper owns the rule, so it survives
+  logout and reboot. A rule runs a local command or POSTs to an HTTPS
+  address, signed with HMAC-SHA256. By default it nudges: it says that
+  messages wait and how many, never what, and settles nothing; the agent
+  reads them with `next`. One nudge per burst, at most one per 10 seconds,
+  again every 5 minutes while messages wait, and a failed URL is retried
+  after 30 s, 2 min and 10 min. `--deliver` hands the message to a command
+  like `watch --exec`, and is refused in confidential and pii rooms. A trace
+  that passed through the recipient more than 5 times does not wake it
+  again. `doctor` lists every rule. See [docs/WAKE.md](docs/WAKE.md).
+- [docs/PRIVACY.md](docs/PRIVACY.md): every way data leaves the machine,
+  and what each one carries.
+
 ## [2.0.0] — 2026-09-25
 
 The first release since 1.0.0. It also carries everything listed under

@@ -219,6 +219,111 @@ pub enum Request {
     OutboxDrop {
         id: String,
     },
+    /// Add a wake rule: when a message waits for `identity` in `room`, the
+    /// helper runs `exec` or POSTs to `url`. Exactly one of the two.
+    WakeAdd {
+        room: String,
+        identity: String,
+        #[serde(default)]
+        exec: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+        /// The signing secret for a URL rule, read by the command from the
+        /// variable the user named. Kept in the OS keychain (or a 0600 file),
+        /// never in the rule file.
+        #[serde(default)]
+        secret: Option<String>,
+        /// The name of that variable, kept for `wake list`.
+        #[serde(default)]
+        secret_env: Option<String>,
+        /// Hand over the message itself and ack on success, instead of a
+        /// nudge. Command rules only.
+        #[serde(default)]
+        deliver: bool,
+        /// Nudge again after this many seconds while messages still wait.
+        #[serde(default)]
+        renudge_secs: Option<u64>,
+    },
+    /// Every wake rule, or a room's.
+    WakeList {
+        #[serde(default)]
+        room: Option<String>,
+    },
+    WakeRemove {
+        id: String,
+    },
+    /// Fire a rule once with a made-up nudge and report what happened.
+    WakeTest {
+        id: String,
+    },
+}
+
+/// Where a wake rule sends its nudge. In the rule file this is just an
+/// `exec = ...` or a `url = ...` line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WakeTarget {
+    Exec {
+        exec: String,
+    },
+    Url {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret_env: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeMode {
+    /// Say that something arrived, never what. The default.
+    #[default]
+    Nudge,
+    /// Hand over the message and ack when the command exits 0.
+    Deliver,
+}
+
+/// A saved wake rule. The helper owns these and starts them itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeRule {
+    pub id: String,
+    /// Room name.
+    pub room: String,
+    /// The local key label the rule wakes for (`--as`).
+    pub identity: String,
+    #[serde(flatten)]
+    pub target: WakeTarget,
+    #[serde(default)]
+    pub mode: WakeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renudge_secs: Option<u64>,
+    #[serde(default)]
+    pub created: String,
+}
+
+impl WakeRule {
+    /// What the rule points at, safe to print: a URL shows its host only.
+    pub fn target_label(&self) -> String {
+        match &self.target {
+            WakeTarget::Exec { exec } => format!("exec {exec}"),
+            WakeTarget::Url { url, .. } => {
+                let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+                let host = rest
+                    .split(['/', '?', '#'])
+                    .next()
+                    .map(|h| h.rsplit('@').next().unwrap_or(h))
+                    .unwrap_or("?");
+                format!("url {scheme}://{host}/…")
+            }
+        }
+    }
+}
+
+/// What `wake test` reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeTestResult {
+    pub ok: bool,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

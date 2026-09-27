@@ -151,3 +151,36 @@ fn decode_key(hex: &str) -> anyhow::Result<[u8; 32]> {
     raw.try_into()
         .map_err(|_| anyhow::anyhow!("inbox key has the wrong length"))
 }
+
+/// Keep a URL wake rule's signing secret: the OS keychain when there is
+/// one, else a 0600 file. Never the rule file.
+pub fn save_wake_secret(paths: &Paths, id: &str, secret: &str, keychain: bool) -> Result<()> {
+    if keychain && keychain_available() {
+        if let Some(e) = entry(paths, &format!("wake/{id}")) {
+            if e.set_password(secret).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    diavlos_core::keys::write_private(&paths.wake_secret(id), secret.as_bytes())?;
+    Ok(())
+}
+
+pub fn load_wake_secret(paths: &Paths, id: &str, keychain: bool) -> Option<String> {
+    if let Ok(s) = std::fs::read_to_string(paths.wake_secret(id)) {
+        return Some(s.trim().to_string());
+    }
+    if keychain && keychain_available() {
+        return entry(paths, &format!("wake/{id}"))?.get_password().ok();
+    }
+    None
+}
+
+pub fn delete_wake_secret(paths: &Paths, id: &str) {
+    let _ = std::fs::remove_file(paths.wake_secret(id));
+    if keychain_available() {
+        if let Some(e) = entry(paths, &format!("wake/{id}")) {
+            let _ = e.delete_credential();
+        }
+    }
+}

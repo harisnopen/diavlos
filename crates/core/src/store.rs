@@ -5,6 +5,7 @@
 //! keeps its own bookmark. Reading never deletes. A message is on disk
 //! before `send` returns. Delivery is at-least-once, dedup by id.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -346,6 +347,17 @@ impl DeliveryState {
             _ => DeliveryState::Leased,
         }
     }
+}
+
+/// What a wake rule sees for one reader: how many messages wait, and the
+/// newest of them. Never content.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WakePending {
+    pub count: u64,
+    pub newest_seq: u64,
+    pub newest_id: String,
+    /// Left out because their trace passed through this reader too often.
+    pub looped: u64,
 }
 
 /// One message handed to one reader.
@@ -1902,6 +1914,64 @@ impl Store {
         )?)
     }
 
+    /// What is waiting for `reader` and free to hand out now: not their
+    /// own, not housekeeping, not held under a live lease, not settled. A
+    /// wake rule nudges on this. Messages on a `trace` the reader has
+    /// already sent more than `trace_limit` messages on are left out and
+    /// counted in `looped`: two agents waking each other stop there.
+    pub fn wake_pending(
+        &self,
+        room_id: &str,
+        reader: &str,
+        now: &str,
+        trace_limit: u64,
+    ) -> Result<WakePending> {
+        let conn = self.lock();
+        let bm = Self::bookmark_in(&conn, room_id, reader)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT m.seq, m.id, json_extract(m.envelope, '$.trace') FROM messages m
+             LEFT JOIN deliveries d ON d.room_id=m.room_id AND d.reader=?2 AND d.seq=m.seq
+             WHERE m.room_id=?1 AND m.from_name != ?2 AND m.type NOT IN ('system', 'control')
+               AND ((d.state IS NULL AND m.seq > ?3)
+                    OR d.state='replay'
+                    OR (d.state='leased' AND d.lease_until<=?4)
+                    OR (d.state='delayed' AND d.retry_at<=?4))
+             ORDER BY m.seq LIMIT 10000",
+        )?;
+        let rows: Vec<(i64, String, Option<String>)> = stmt
+            .query_map(params![room_id, reader, bm as i64, now], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut sent_on: HashMap<String, u64> = HashMap::new();
+        let mut out = WakePending::default();
+        for (seq, id, trace) in rows {
+            if let Some(t) = trace.filter(|t| !t.is_empty()) {
+                let n = match sent_on.get(&t) {
+                    Some(n) => *n,
+                    None => {
+                        let n: i64 = conn.query_row(
+                            "SELECT COUNT(*) FROM messages WHERE room_id=?1 AND from_name=?2
+                               AND json_extract(envelope, '$.trace')=?3",
+                            params![room_id, reader, t],
+                            |r| r.get(0),
+                        )?;
+                        sent_on.insert(t.clone(), n as u64);
+                        n as u64
+                    }
+                };
+                if n > trace_limit {
+                    out.looped += 1;
+                    continue;
+                }
+            }
+            out.count += 1;
+            out.newest_seq = seq as u64;
+            out.newest_id = id;
+        }
+        Ok(out)
+    }
+
     // ---- outbox --------------------------------------------------------
     //
     // pending -> (sequenced: row deleted with the append)
@@ -2326,6 +2396,63 @@ mod tests {
             owner,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn wake_pending_counts_what_waits_and_nothing_else() {
+        let owner = Identity::generate("haris", Kind::Human);
+        let s = Store::open_memory().unwrap();
+        s.create_room(&room(&owner)).unwrap();
+        let put = |from: &str, kind: MessageType, trace: Option<&str>| {
+            let mut m = Message::new(
+                Draft {
+                    room: "r_test".into(),
+                    from: from.into(),
+                    text: "hi".into(),
+                    kind: Some(kind),
+                    trace: trace.map(String::from),
+                    ..Default::default()
+                },
+                &owner,
+            )
+            .unwrap();
+            s.sequence_and_append(&mut m).unwrap();
+            m
+        };
+        let now = "2026-09-27T12:00:00Z";
+        for _ in 0..3 {
+            put("haris", MessageType::Task, None);
+        }
+        // Your own messages and helper notices never count.
+        put("bob", MessageType::Chat, None);
+        let newest = put("haris", MessageType::System, None);
+        let p = s.wake_pending("r_test", "bob", now, 5).unwrap();
+        assert_eq!((p.count, p.newest_seq), (3, 3));
+        assert_ne!(p.newest_id, newest.id);
+
+        // One held under a live lease is not waiting; once the lease runs
+        // out it is again.
+        let (leased, _) = s
+            .delivery_lease("r_test", "bob", now, "2026-09-27T12:10:00Z", 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased.seq, 1);
+        assert_eq!(s.wake_pending("r_test", "bob", now, 5).unwrap().count, 2);
+        assert_eq!(
+            s.wake_pending("r_test", "bob", "2026-09-27T12:11:00Z", 5)
+                .unwrap()
+                .count,
+            3
+        );
+
+        // A trace bob already sent on more than five times does not wake him.
+        for _ in 0..6 {
+            put("bob", MessageType::Reply, Some("ping-pong"));
+        }
+        put("haris", MessageType::Reply, Some("ping-pong"));
+        put("haris", MessageType::Task, Some("fresh"));
+        let p = s.wake_pending("r_test", "bob", now, 5).unwrap();
+        assert_eq!((p.count, p.looped), (3, 1));
     }
 
     #[test]

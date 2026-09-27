@@ -33,7 +33,7 @@ pub use policy::{DefaultHook, Policy, PolicyHook};
 pub use room::{Member, Role, Room};
 pub use store::{
     Delivery, DeliveryState, LocalMember, OutboxCounts, OutboxEntry, OutboxState, Settle,
-    SpendOutcome, SpendRecord, SpendRequest, Store,
+    SpendOutcome, SpendRecord, SpendRequest, Store, WakePending,
 };
 
 /// Version of this crate, for the version handshake.

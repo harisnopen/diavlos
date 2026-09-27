@@ -11,6 +11,7 @@ mod outbox;
 mod peers;
 
 mod keys;
+pub mod wake;
 
 #[cfg(test)]
 mod testkit;
@@ -73,6 +74,10 @@ pub struct Helper {
     /// Test-only: seconds added to the wall clock for this helper's own
     /// timing decisions (retries, leases).
     clock_skew: std::sync::atomic::AtomicI64,
+    /// For URL wake rules only. Proxy settings come from the environment.
+    pub http: reqwest::Client,
+    /// One task per wake rule, by rule id.
+    wake_tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl Helper {
@@ -908,6 +913,8 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
         metrics_addr,
         faults: Default::default(),
         clock_skew: Default::default(),
+        http: crate::bridge::webhook::client(),
+        wake_tasks: Mutex::new(HashMap::new()),
     });
     helper.emit(
         "helper_up",
@@ -925,6 +932,8 @@ async fn run_inner(paths: Paths, mut config: Config) -> anyhow::Result<()> {
             helper.ensure_room_task(&room.id).await;
         }
     }
+    // Wake rules saved by `diavlos wake add`.
+    wake::start_all(&helper).await;
     // Commands over the local socket.
     let listener = local::bind(&paths)?;
     let listener_handle = Arc::new(listener);

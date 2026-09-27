@@ -112,6 +112,31 @@ pub async fn run(paths: &Paths) -> Value {
             }
         }
     }
+    // Wake rules: what the helper runs or calls on its own.
+    let rules = wake_rules(paths);
+    if !rules.is_empty() {
+        check(
+            "wake rules",
+            true,
+            rules
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} {} for {} -> {} ({})",
+                        r.id,
+                        r.room,
+                        r.identity,
+                        r.target_label(),
+                        match r.mode {
+                            diavlos_client::proto::WakeMode::Nudge => "nudge",
+                            diavlos_client::proto::WakeMode::Deliver => "deliver",
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
     let keys: Vec<String> = std::fs::read_dir(paths.keys_dir())
         .map(|rd| {
             rd.filter_map(|e| e.ok())
@@ -293,4 +318,26 @@ pub fn print(report: &Value) {
             c["detail"].as_str().unwrap_or("")
         );
     }
+}
+
+/// Every saved wake rule, read from the rule files alone.
+fn wake_rules(paths: &Paths) -> Vec<diavlos_client::proto::WakeRule> {
+    #[derive(serde::Deserialize)]
+    struct File {
+        #[serde(default)]
+        rule: Vec<diavlos_client::proto::WakeRule>,
+    }
+    let Ok(dir) = std::fs::read_dir(paths.home.join("rooms")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in dir.flatten() {
+        if let Ok(text) = std::fs::read_to_string(e.path().join("wake.toml")) {
+            if let Ok(f) = toml::from_str::<File>(&text) {
+                out.extend(f.rule);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
 }
