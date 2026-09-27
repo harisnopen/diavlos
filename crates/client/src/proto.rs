@@ -24,6 +24,10 @@ pub struct DraftWire {
     pub class: Option<DataClass>,
     #[serde(default)]
     pub action: Option<diavlos_core::Action>,
+    /// Files to send with it: paths on this machine. The helper reads
+    /// them, so they must be where it can see them (use full paths).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +252,14 @@ pub enum Request {
     /// message id, the thread it belongs to (what it replies to, up to the
     /// start, and every reply below that).
     Trace {
+        room: String,
+        identity: String,
+        id: String,
+    },
+    /// Fetch a file and save it under `files/<room>/`. `id` is a file id
+    /// (`sha256:…`, or at least 12 hex digits of it) or a message id, for
+    /// every file on that message.
+    GetFile {
         room: String,
         identity: String,
         id: String,
@@ -605,6 +617,24 @@ pub struct SendResult {
     /// True once the room's home has given it a place in the chain. False
     /// means it is on disk here and will go when the home is reachable.
     pub delivered: bool,
+}
+
+/// A file `get` saved, and what to know before opening it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedFile {
+    pub id: String,
+    /// The name the sender gave, cleaned.
+    pub name: String,
+    /// Where it is now.
+    pub path: String,
+    pub size: u64,
+    /// What the bytes look like: text, png, pdf, program, other, …
+    pub kind: String,
+    pub from: String,
+    pub msg_id: String,
+    /// Read these before opening it.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// One message in the outbox.

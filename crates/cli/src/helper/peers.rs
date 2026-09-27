@@ -45,6 +45,7 @@ pub(super) async fn serve_link(helper: Arc<Helper>, link: Arc<dyn Link>) -> Resu
                     Wire::HelloOk {
                         v: PROTOCOL_VERSION,
                         version: diavlos_core::VERSION.into(),
+                        features: crate::net::features(),
                     }
                 }
                 Wire::Hello { v, .. } => Wire::err(
@@ -212,7 +213,11 @@ async fn handle(helper: &Arc<Helper>, link: &Arc<dyn Link>, req: Wire) -> Result
         Wire::Hello { .. } => Ok(Wire::HelloOk {
             v: PROTOCOL_VERSION,
             version: diavlos_core::VERSION.into(),
+            features: crate::net::features(),
         }),
+        req @ (Wire::FileAsk { .. } | Wire::FilePut { .. } | Wire::FileGet { .. }) => {
+            super::files::serve(helper, link, req).await
+        }
         other => Err(Error::Invalid(format!("unexpected {}", other.label()))),
     }
 }
@@ -419,8 +424,11 @@ async fn connect_home(helper: &Helper, room: &Room) -> Result<Arc<dyn Link>> {
         version: diavlos_core::VERSION.into(),
     };
     match link.request(&hello).await?.into_result()? {
-        Wire::HelloOk { version, .. } => {
+        Wire::HelloOk {
+            version, features, ..
+        } => {
             helper.saw_version(&room.home_node, &version);
+            helper.saw_features(&room.home_node, &features);
             Ok(link)
         }
         other => Err(Error::Invalid(format!("unexpected {}", other.label()))),
@@ -452,7 +460,7 @@ async fn serve_home_link(
                         Err(Error::Invalid(_)) => Wire::NeedSync { room_id: room.id.clone() },
                         Err(e) => Wire::error(&e),
                     },
-                    Wire::Hello { .. } => Wire::HelloOk { v: PROTOCOL_VERSION, version: diavlos_core::VERSION.into() },
+                    Wire::Hello { .. } => Wire::HelloOk { v: PROTOCOL_VERSION, version: diavlos_core::VERSION.into(), features: crate::net::features() },
                     other => Wire::err(1, format!("unexpected {}", other.label())),
                 };
                 let need_sync = matches!(resp, Wire::NeedSync { .. });

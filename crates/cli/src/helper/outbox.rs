@@ -57,7 +57,7 @@ impl Outcome {
     /// did not complete, so the home may or may not have the message.
     /// Retrying is safe either way: the home answers a resubmit with the
     /// copy it stored.
-    fn local(error: Error) -> Outcome {
+    pub(super) fn local(error: Error) -> Outcome {
         match error {
             Error::ReachedNobody(_) | Error::TimedOut | Error::Io(_) => Outcome::Temporary {
                 error,
@@ -114,6 +114,10 @@ impl Outcome {
 /// Submit one message to the home and store the sequenced copy. Storing it
 /// takes it out of the outbox in the same transaction.
 pub async fn submit(helper: &Helper, room: &Room, link: &Arc<dyn Link>, msg: &Message) -> Outcome {
+    // Files first: the home takes a message only once it holds them.
+    if let Err(outcome) = super::files::upload(helper, room, link, msg).await {
+        return outcome;
+    }
     let req = Wire::Submit {
         room_id: room.id.clone(),
         message: msg.clone(),

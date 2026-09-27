@@ -73,6 +73,15 @@ impl Paths {
     pub fn wake(&self, room: &str) -> PathBuf {
         self.home.join("rooms").join(room).join("wake.toml")
     }
+    /// File bytes this helper keeps for a room: uploads waiting to go, and
+    /// on the room's home, what it holds for the members. Named by id.
+    pub fn blobs(&self, room_id: &str) -> PathBuf {
+        self.home.join("blobs").join(room_id)
+    }
+    /// Where `get` saves files for people and agents to use.
+    pub fn files(&self, room: &str) -> PathBuf {
+        self.home.join("files").join(room)
+    }
     /// Where a URL rule's secret lives when there is no OS keychain.
     pub fn wake_secret(&self, id: &str) -> PathBuf {
         self.keys_dir().join(format!("wake-{id}.secret"))

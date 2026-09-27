@@ -238,6 +238,7 @@ signed by the human's own key is.
 | `diavlos grant <room> <name> --role approver --until 2026-12-31` | Give a member a role: observer, chat, task-giver, approver. Can expire. |
 | `diavlos rotate <room>` | New room key. Everyone out. Re-invite who you keep. |
 | `diavlos send <room> "text" --type task --to bob` | Send a message. Reads from stdin if no text. |
+| `diavlos send <room> "text" --file ./build.log` / `diavlos get <room> <file-or-message-id>` | Send files with a message, up to 25 MB each by default. They go helper to helper through the room's home, checked against their fingerprint at each end. `get` saves them under `~/.diavlos/files/<room>/` and warns about anything that could run. See [docs/FILES.md](docs/FILES.md). |
 | `diavlos ask <room> "text" --timeout 120 [--action <json>]` | Send a question and wait for a reply to that exact message. Exit 4 on timeout, 6 on a deny. |
 | `diavlos next <room> [--timeout <secs>] [--manual-ack] [--lease <secs>]` | Wait for the next message from someone else. Skips your own and helper notices. Acks it once printed; with `--manual-ack` it prints a token and the message stays yours until `ack`, `nack`, or the lease (600 s) runs out, then comes round again. |
 | `diavlos ack <token>` / `renew <token>` / `nack <token> [--retry-in <secs>]` | Settle a message you hold: taken on, still working, or not now. Ack means taken on, not finished: say `done` in the room for that. |
@@ -395,7 +396,7 @@ Proxy settings from the environment (`HTTPS_PROXY`) are respected.
   owner is told.
 - **Floods and loops** stop at the per-minute and daily limits. The owner
   gets a burst alert.
-- **Common secrets are refused.** Text, data, action and trace are scanned
+- **Common secrets are refused.** Text, data, action, trace and text files are scanned
   for anything that looks like an API key, token or private key, and the
   message is not sent. That catches accidents. It is not a data-loss
   control: base64 or a split string gets past any pattern.

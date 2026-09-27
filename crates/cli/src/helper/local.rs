@@ -29,6 +29,8 @@ use crate::net::Wire;
 
 /// How long `send` waits for the home before answering "queued".
 const SEND_WAIT: Duration = Duration::from_secs(3);
+/// How long `send` waits for a message with files to reach the home.
+const SEND_WAIT_FILES: Duration = Duration::from_secs(120);
 
 pub fn bind(paths: &Paths) -> anyhow::Result<Listener> {
     #[cfg(unix)]
@@ -405,6 +407,9 @@ async fn dispatch(helper: &Arc<Helper>, req: Request) -> Result<serde_json::Valu
         )?,
         Request::Trace { room, identity, id } => {
             serde_json::to_value(trace(helper, &room, &identity, &id)?)?
+        }
+        Request::GetFile { room, identity, id } => {
+            serde_json::to_value(super::files::get(helper, &room, &identity, &id).await?)?
         }
         Request::WakeList { room } => {
             let mut rules = super::wake::all_rules(helper);
@@ -960,6 +965,10 @@ pub(super) async fn send(
             room.name
         )));
     }
+    let mut draft = draft;
+    let paths = std::mem::take(&mut draft.files);
+    super::files::attach(helper, &room, &lm.member.name, &paths, &mut draft.data).await?;
+    let has_files = !paths.is_empty();
     let msg = build(helper, &room, &lm, identity, draft).await?;
     if helper.is_home(&room) {
         let msg = helper.sequence_here(&room, msg, None).await?;
@@ -983,6 +992,13 @@ pub(super) async fn send(
     // On disk before send returns.
     helper.store.outbox_add(&msg)?;
     helper.wake_room(&room.id).await;
+    // Files take longer to go; past this the upload goes on from the
+    // outbox and `send` says it is queued.
+    let wait = if has_files {
+        SEND_WAIT_FILES
+    } else {
+        SEND_WAIT
+    };
     let deadline = tokio::time::Instant::now() + SEND_WAIT;
     let mut link = helper.home_link(&room.id).await;
     while link.is_none() && tokio::time::Instant::now() < deadline {
@@ -991,7 +1007,7 @@ pub(super) async fn send(
     }
     if let Some(link) = link {
         let lock = helper.submit_lock(&room.id).await;
-        let outcome = tokio::time::timeout(SEND_WAIT, async {
+        let outcome = tokio::time::timeout(wait, async {
             let _guard = lock.lock().await;
             if let Some(done) = helper.store.message_by_id(&msg.id)? {
                 return Ok(Outcome::Sequenced(Box::new(done)));
@@ -1630,7 +1646,10 @@ pub(super) async fn check_approve(
 
 /// The link to a room's home, waiting a moment for one to come up: a
 /// helper started for this very command links within a second or two.
-async fn wait_for_home_link(helper: &Helper, room: &Room) -> Option<Arc<dyn crate::net::Link>> {
+pub(super) async fn wait_for_home_link(
+    helper: &Helper,
+    room: &Room,
+) -> Option<Arc<dyn crate::net::Link>> {
     let deadline = tokio::time::Instant::now() + SEND_WAIT;
     loop {
         if let Some(l) = helper.home_link(&room.id).await {
