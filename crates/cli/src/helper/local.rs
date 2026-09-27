@@ -403,6 +403,9 @@ async fn dispatch(helper: &Arc<Helper>, req: Request) -> Result<serde_json::Valu
             )
             .await?,
         )?,
+        Request::Trace { room, identity, id } => {
+            serde_json::to_value(trace(helper, &room, &identity, &id)?)?
+        }
         Request::WakeList { room } => {
             let mut rules = super::wake::all_rules(helper);
             if let Some(room) = room {
@@ -1366,12 +1369,86 @@ async fn ask(
     Ok(AskResult { question, reply })
 }
 
+/// A message id gives its thread; anything else is taken as a trace.
+fn trace(helper: &Helper, room: &str, identity: &str, id: &str) -> Result<Vec<Message>> {
+    let room = helper.store.room(room)?;
+    local_member(helper, &room, identity)?;
+    let start = helper
+        .store
+        .message_by_id(id)?
+        .filter(|m| m.room == room.id);
+    let Some(start) = start else {
+        let out = helper.store.messages_with_trace(&room.id, id)?;
+        if out.is_empty() {
+            return Err(Error::Invalid(format!(
+                "no message and no trace {id:?} in {}",
+                room.name
+            )));
+        }
+        return Ok(out);
+    };
+    // Up to where the thread starts.
+    let mut root = start;
+    for _ in 0..1000 {
+        let Some(parent_id) = root.reply_to.clone() else {
+            break;
+        };
+        match helper.store.message_by_id(&parent_id)? {
+            Some(p) if p.room == room.id => root = p,
+            _ => break,
+        }
+    }
+    // Then every reply below it.
+    let mut out = vec![root.clone()];
+    let mut queue = std::collections::VecDeque::from([root.id.clone()]);
+    while let Some(parent) = queue.pop_front() {
+        for m in helper.store.replies_to(&room.id, &parent)? {
+            if out.len() >= 5000 {
+                break;
+            }
+            queue.push_back(m.id.clone());
+            out.push(m);
+        }
+    }
+    out.sort_by_key(|m| m.seq);
+    out.dedup_by(|a, b| a.id == b.id);
+    Ok(out)
+}
+
 async fn who(helper: &Helper, room: &str) -> Result<Vec<WhoEntry>> {
     let room = helper.store.room(room)?;
     let now = now_ts();
     let mut out = Vec::new();
     let me = helper.net.node_id();
+    let rules = super::wake::load_room(&helper.paths, &room.name);
+    let locals = helper.store.local_members(&room.id)?;
     for m in helper.store.members(&room.id)? {
+        let version = match &m.node {
+            Some(n) if *n == me => Some(diavlos_core::VERSION.to_string()),
+            Some(n) => helper
+                .node_versions
+                .lock()
+                .ok()
+                .and_then(|v| v.get(n).cloned()),
+            None => None,
+        };
+        let wake: Vec<String> = locals
+            .iter()
+            .filter(|l| l.member.name == m.name)
+            .flat_map(|l| rules.iter().filter(|r| r.identity == l.identity))
+            .map(|r| {
+                let how = match &r.target {
+                    diavlos_client::proto::WakeTarget::Exec { .. } => "exec".to_string(),
+                    diavlos_client::proto::WakeTarget::Url { url, .. } => {
+                        crate::bridge::webhook::host_of(url)
+                    }
+                };
+                match r.mode {
+                    diavlos_client::proto::WakeMode::Nudge => how,
+                    diavlos_client::proto::WakeMode::Deliver => format!("{how} (deliver)"),
+                }
+            })
+            .collect();
         let online = match &m.node {
             Some(n) if *n == me => true,
             Some(n) if helper.is_home(&room) => helper.node_online(&room.id, n).await,
@@ -1408,6 +1485,8 @@ async fn who(helper: &Helper, room: &str) -> Result<Vec<WhoEntry>> {
             expired: m.is_expired(&now),
             node: m.node.clone(),
             online,
+            version,
+            wake,
         });
     }
     Ok(out)

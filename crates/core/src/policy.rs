@@ -15,6 +15,16 @@ pub struct Policy {
     /// Verbs (of an `action`) that must not run without a human approve.
     #[serde(default = "default_approve_verbs")]
     pub approve_verbs: Vec<String>,
+    /// How deep one task may hand work on: a task sent in reply to a task
+    /// sent in reply to a task, and so on. A task that would go deeper, or
+    /// hand work back to an agent already in that chain, is refused. 0 turns
+    /// the check off.
+    #[serde(default = "default_max_task_hops")]
+    pub max_task_hops: u32,
+}
+
+fn default_max_task_hops() -> u32 {
+    4
 }
 
 fn default_approve_verbs() -> Vec<String> {
@@ -27,6 +37,7 @@ impl Default for Policy {
     fn default() -> Self {
         Policy {
             approve_verbs: default_approve_verbs(),
+            max_task_hops: default_max_task_hops(),
         }
     }
 }
@@ -94,6 +105,7 @@ mod tests {
         assert_eq!(Policy::load(&path).unwrap(), Policy::default());
         let custom = Policy {
             approve_verbs: vec!["rm".into()],
+            max_task_hops: 2,
         };
         custom.save(&path).unwrap();
         assert_eq!(Policy::load(&path).unwrap(), custom);

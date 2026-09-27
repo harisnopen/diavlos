@@ -1403,6 +1403,19 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Every message in a room that carries this trace, in order.
+    pub fn messages_with_trace(&self, room_id: &str, trace: &str) -> Result<Vec<Message>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.envelope, c.body, c.deleted FROM messages m
+             LEFT JOIN contents c ON c.msg_id = m.id
+             WHERE m.room_id=?1 AND json_extract(m.envelope, '$.trace')=?2
+             ORDER BY m.seq LIMIT 5000",
+        )?;
+        let rows = stmt.query_map(params![room_id, trace], |r| self.row_to_message(r))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Who holds a task right now: the last claim not followed by a
     /// release from the same member.
     pub fn claim_holder(&self, room_id: &str, task_id: &str) -> Result<Option<String>> {

@@ -251,6 +251,7 @@ pub fn helper(node: &str, home: &TempHome, config: Option<Config>) -> Arc<Helper
         faults: Default::default(),
         clock_skew: Default::default(),
         http: reqwest::Client::new(),
+        node_versions: std::sync::Mutex::new(HashMap::new()),
         wake_tasks: Mutex::new(HashMap::new()),
     })
 }
