@@ -196,8 +196,14 @@ part is proved by logging in as the GitHub user `harisnopen`.
 https://registry.modelcontextprotocol.io is the official list of MCP
 servers. Other directories (and MCP clients) read from it, so one listing
 here reaches many places. The entry is `server.json` at the repo root. It
-lists both packages, npm and crates.io, and how to start the server
-(`diavlos mcp`).
+lists the crates.io package and how to start the server (`diavlos mcp`).
+
+npm is out of the listing for now: the npm account needs its security key
+to set up trusted publishing, so npm still carries 1.0.0 and the registry
+would refuse a listing that names npm 2.1.0. When npm has the current
+version again, put the npm package back in `server.json` (the same block
+as the cargo one, with `"registryType": "npm"`, `"registryBaseUrl":
+"https://registry.npmjs.org"` and `"runtimeHint": "npx"`).
 
 The registry refuses a package unless the package itself names the
 listing. Both are already in place:
@@ -211,7 +217,7 @@ listing. Both are already in place:
 `crates/cli/tests/publishing.rs` fails the build if either goes missing,
 or if a version in `server.json` drifts from the crate's.
 
-**Publish**, after npm and crates.io carry the new version:
+**Publish**, after every package it lists carries the new version:
 
 ```bash
 # once: get the publisher tool

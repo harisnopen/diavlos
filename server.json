@@ -37,35 +37,6 @@
           "isSecret": false
         }
       ]
-    },
-    {
-      "registryType": "npm",
-      "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "diavlos",
-      "version": "2.1.0",
-      "runtimeHint": "npx",
-      "transport": { "type": "stdio" },
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "mcp",
-          "description": "Start the stdio MCP server rather than the interactive CLI."
-        }
-      ],
-      "environmentVariables": [
-        {
-          "name": "DIAVLOS_HOME",
-          "description": "Data directory. Defaults to ~/.diavlos. Keep it short: the helper's Unix socket path lives inside it and the kernel caps that at 107 bytes.",
-          "isRequired": false,
-          "isSecret": false
-        },
-        {
-          "name": "DIAVLOS_AS",
-          "description": "Which local key to act as. Created on first use. Defaults to 'default'.",
-          "isRequired": false,
-          "isSecret": false
-        }
-      ]
     }
   ]
 }
