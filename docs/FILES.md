@@ -15,6 +15,10 @@ diavlos get ops <message-id>     # every file on that message
 In MCP, `send` takes `files` (paths on this machine) and `get_file` saves
 one and says where.
 
+[Watch it run](use-cases/files-between-two-desktops.md) on two real
+machines: a file there and back, the fingerprint check, and a script saved
+as `.unsafe`.
+
 ## How it travels
 
 1. `send` hashes each file (SHA-256) and puts a small reference in the
