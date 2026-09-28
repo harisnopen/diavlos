@@ -127,8 +127,8 @@ https://github.com/harisnopen/homebrew-tap, and a user installs with:
 
 ```bash
 brew tap harisnopen/tap
-brew install diavlos          # once a release exists
-brew install --HEAD diavlos   # works today, builds from main
+brew install diavlos          # the latest release
+brew install --HEAD diavlos   # builds from main
 ```
 
 The formula is not written by hand. **The release workflow generates it**

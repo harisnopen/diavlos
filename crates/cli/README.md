@@ -59,9 +59,9 @@ Delivery promise, in writing: **at-least-once, dedup by id, on disk before
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/harisnopen/diavlos/main/install.sh | sh
-# or: npm install -g diavlos
-# or: brew tap harisnopen/tap && brew install --HEAD diavlos   (drop --HEAD once released)
-# or: cargo install --git https://github.com/harisnopen/diavlos diavlos
+# or: npm install -g diavlos   (still 1.0.0 on npm for now)
+# or: brew install harisnopen/tap/diavlos
+# or: cargo install diavlos
 ```
 
 From source: Rust 1.95 or newer, `cargo build --release`, the binary is
