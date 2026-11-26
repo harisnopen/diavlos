@@ -10,6 +10,17 @@ imply a change to the wire.
 
 ## [Unreleased]
 
+### Security
+
+- Dependencies updated to clear 16 RustSec advisories that `cargo audit`
+  started reporting after 2.1.1. The ones on the network path: QUIC
+  (`quinn-proto`, `quinn-udp`: a long Retry token could panic or exhaust
+  memory, a frame could open streams past the limit), TLS (`rustls`,
+  `rustls-webpki`, `webpki-roots`), and `tokio`. Also the MCP library
+  (`rmcp` 3.11) and the bundled SQLite: `rusqlite` 0.40 → 0.43 brings
+  `libsqlite3-sys` 0.40, past RUSTSEC-2026-0459. Nothing changes on the
+  wire or in the database format.
+
 ## [2.1.1] — 2026-09-27
 
 Clearer messages, and films of eight things Diavlos does. Nothing changes
