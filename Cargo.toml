@@ -27,8 +27,8 @@ hmac = "0.13"
 data-encoding = "2"
 ulid = "3"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2"
+rusqlite = { version = "0.43", features = ["bundled"] }
+rusqlite_migration = "2.9"
 clap = { version = "4", features = ["derive", "env"] }
 directories = "6"
 toml = "1"
